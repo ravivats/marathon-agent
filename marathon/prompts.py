@@ -18,6 +18,8 @@ How to work:
 - Call checkpoint after each meaningful change. The harness commits it and runs the tests.
 - The tests in {tests_dir}/ and the goal file are read-only.
 - If the same approach fails 3 times in a row, write why in PROGRESS.md and try another one.
+- To look something up without filling your context, use ask_subagent and pass file paths.
+  A longer brief for the helper can go in a file under .marathon/notes/.
 - Call finish only when you believe the goal is met. A separate judge checks your work.
 
 Safety: stay inside this folder. Don't delete what you didn't create. Don't use the network
@@ -35,8 +37,9 @@ Don't write the implementation. When you're done, call finish with a one-line su
 """
 
 SUBAGENT = """\
-You answer one focused question about a codebase. Look only at what you need.
-Reply in 10 lines or less. Don't change any files.
+You answer one focused question about a codebase. Look only at what you need, and don't change any code.
+Reply in 5 lines or less. If the full answer needs more room, write it to the notes file named in
+the question first, then reply with the short version.
 """
 
 JUDGE = """\

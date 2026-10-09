@@ -5,10 +5,12 @@
 
 It shows the mechanics end to end in a throwaway repo:
   - a separate test-writer agent writes the tests first
-  - attempt 1 follows a bad plan, even tries to edit the tests (the harness undoes it),
-    makes no progress for `patience` checkpoints and gets dropped
-  - attempt 2 starts in a fresh worktree, asks a helper with a fresh context, makes
-    progress, re-reads the goal every 2 steps, and finishes with tests passing and a judge PASS
+  - attempt 1 follows a bad plan, is told to switch approach after 2 checkpoints without
+    progress, even tries to edit the tests (the harness undoes it), makes no progress for
+    `patience` checkpoints and gets dropped
+  - attempt 2 starts in a fresh worktree, asks a helper with a fresh context (a 5-line answer,
+    the rest in a notes file), makes progress, re-reads the goal every 2 steps, and finishes
+    with tests passing and a judge PASS
 """
 
 from __future__ import annotations
@@ -121,8 +123,17 @@ def script() -> ScriptedLLM:
             ],
             "subagent": [
                 call("read_file", path="tests/test_slug.py"),
+                call(
+                    "write_file",
+                    path=".marathon/notes/helper-1.md",
+                    content="# What the tests expect\n\n- 'Hello' -> 'hello'\n"
+                    "- 'long running agents' -> 'long-running-agents'\n"
+                    "- \"Don't lose the plot!\" -> 'dont-lose-the-plot'\n"
+                    "- '  many   spaces  ' -> 'many-spaces'\n",
+                ),
                 say(
-                    "Lowercase, words joined by '-', punctuation dropped, repeated and edge spaces removed."
+                    "Lowercase, words joined by '-', punctuation dropped, repeated and edge spaces removed.\n"
+                    "Examples for each test are in the notes file."
                 ),
             ],
             "judge": [
@@ -137,7 +148,12 @@ def main(keep: bool = True) -> int:
     (root / "goal.md").write_text(GOAL)
     print(f"Demo repo: {root}\n")
     cfg = Config(
-        repo=root, patience=3, reread_every_steps=2, max_attempts=3, model="scripted"
+        repo=root,
+        patience=3,
+        switch_after=2,
+        reread_every_steps=2,
+        max_attempts=3,
+        model="scripted",
     )
     outcome = Harness(cfg, script()).run()
     print(f"\nOutcome: {outcome}\n\nBranches and commits:")

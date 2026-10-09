@@ -4,7 +4,8 @@
 """Small, general tools that the model combines on its own (Fix 4: a light harness).
 
 read, write, edit, list, search and run. Every path stays inside one folder (the agent's
-own worktree, Fix 8). Long outputs are cut short and the full text is saved to a file the
+own worktree, Fix 8), and `run` goes through the attempt's shell: this machine or a container
+(see sandbox.py). Long outputs are cut short and the full text is saved to a file the
 agent can read later (Fix 5: point at the data instead of pasting it).
 """
 
@@ -14,8 +15,9 @@ import fnmatch
 import json
 import os
 import re
-import subprocess
 from pathlib import Path
+
+from .sandbox import LocalShell
 
 SKIP_DIRS = {".git", ".marathon", "__pycache__", "node_modules", ".venv", "venv"}
 
@@ -32,8 +34,10 @@ class Workspace:
         writable_only: tuple[str, ...] = (),
         output_limit: int = 6000,
         cmd_timeout: int = 300,
+        shell=None,
     ):
         self.root = Path(root).resolve()
+        self.shell = shell or LocalShell(self.root)
         self.protected = tuple(p.rstrip("/") for p in protected)
         self.writable_only = tuple(p.rstrip("/") for p in writable_only)
         self.output_limit = output_limit
@@ -148,19 +152,8 @@ def search(ws: Workspace, pattern: str, path: str = ".") -> str:
 
 
 def run(ws: Workspace, command: str, timeout: int = 0) -> str:
-    try:
-        proc = subprocess.run(
-            command,
-            shell=True,
-            cwd=ws.root,
-            capture_output=True,
-            text=True,
-            timeout=timeout or ws.cmd_timeout,
-        )
-        out = f"exit code {proc.returncode}\n{proc.stdout}{proc.stderr}"
-    except subprocess.TimeoutExpired as e:
-        out = f"timed out after {e.timeout}s\n{e.stdout or ''}{e.stderr or ''}"
-    return ws.clip(out, "run")
+    code, out = ws.shell.run(command, timeout or ws.cmd_timeout)
+    return ws.clip(f"exit code {code}\n{out}", "run")
 
 
 FUNCS = {
@@ -217,7 +210,8 @@ SPECS = {
     ),
     "ask_subagent": (
         "Hand a focused question to a helper with a fresh, empty context. Give it file paths "
-        "to look at, not their contents. It answers in a few lines.",
+        "to look at, not their contents (a longer brief can go in .marathon/notes/). It answers "
+        "in 5 lines or less and saves anything longer to a notes file.",
         {"task": _S, "paths": {"type": "array", "items": _S}},
         ["task"],
     ),

@@ -173,6 +173,69 @@ class Loop(TempRepoCase):
         ]
         self.assertEqual(len(forced), 2)
 
+    def test_agent_is_told_to_switch_after_3_stalls(self):
+        root = self.repo_with_tests()
+        llm = ScriptedLLM({"worker": [call("checkpoint", summary="same idea")] * 7})
+        h = harness(root, llm, patience=10, max_turns=7)
+        self.assertEqual(h.run(), "budget")
+        self.assertEqual([e["step"] for e in self.kinds(h, "switch")], [3, 6])
+        results = [m["content"] for a, ms in llm.seen if a == "worker" for m in ms
+                   if m["role"] == "tool"]
+        self.assertTrue(any("then switch to a different one" in r for r in results))
+
+    def test_protected_paths_are_restored_and_read_only(self):
+        root = self.make_repo({"goal.md": demo.GOAL, "tests/test_slug.py": demo.TESTS,
+                               "Makefile": "test:\n\tpython3 -m unittest\n"})
+        llm = ScriptedLLM(
+            {
+                "worker": [
+                    call("write_file", path="Makefile", content="test:\n\ttrue\n"),
+                    call("run", command="printf 'test:\\n\\ttrue\\n' > Makefile"),
+                    call("checkpoint", summary="simplify the build"),
+                    say("ok"),
+                ]
+            }
+        )
+        h = harness(root, llm, protect=["Makefile"], max_turns=4)
+        h.run()
+        last = [ms for a, ms in llm.seen if a == "worker"][-1]
+        results = [m["content"] for m in last if m["role"] == "tool"]
+        self.assertIn("Makefile is read-only", results[0])
+        self.assertIn("undone: Makefile", results[2])
+        tip = gitops.git(root, "show", f"marathon/{h.run_id}/attempt-1:Makefile")
+        self.assertIn("python3 -m unittest", tip)
+
+    def test_helper_answers_in_5_lines_and_leaves_notes(self):
+        root = self.repo_with_tests()
+        llm = ScriptedLLM(
+            {
+                "worker": [
+                    call("write_file", path=".marathon/notes/brief.md", content="Find the slug rules."),
+                    call("ask_subagent", task="Read the brief.", paths=[".marathon/notes/brief.md"]),
+                    say("thanks"),
+                ],
+                "subagent": [
+                    call("write_file", path="slug.py", content="hacked"),
+                    call("write_file", path=".marathon/notes/helper-1.md", content="all the details"),
+                    say("\n".join(f"line {i}" for i in range(1, 9))),
+                ],
+            }
+        )
+        h = harness(root, llm, max_turns=3)
+        h.run()
+        helper_msgs = [ms for a, ms in llm.seen if a == "subagent"]
+        # the helper got a pointer to the brief, not its contents, and a fresh context
+        self.assertIn(".marathon/notes/brief.md", helper_msgs[0][1]["content"])
+        self.assertNotIn("Find the slug rules", helper_msgs[0][1]["content"])
+        self.assertEqual([m["role"] for m in helper_msgs[0]], ["system", "user"])
+        # it could write its notes file and nothing else
+        self.assertIn("only write inside", helper_msgs[1][-1]["content"])
+        worker_last = [ms for a, ms in llm.seen if a == "worker"][-1]
+        reply = worker_last[-1]["content"]
+        self.assertEqual(worker_last[-1]["role"], "tool")
+        self.assertEqual(reply.splitlines(), [f"line {i}" for i in range(1, 6)]
+                         + ["Full notes: .marathon/notes/helper-1.md"])
+
     def test_trim_never_starts_with_a_tool_result(self):
         root = self.repo_with_tests()
         h = harness(root, ScriptedLLM({}), max_history=6)

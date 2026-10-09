@@ -5,8 +5,12 @@
 the test writer, the ask_subagent helper and the clean-context judge (Fix 10)."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from . import prompts
 from .tools import ToolError, Workspace, call_tool, parse_args, schemas
+
+ANSWER_LINES = 5
 
 
 def text_of(msg: dict) -> str:
@@ -49,12 +53,24 @@ def write_tests(llm, ws: Workspace, goal_file: str, tests_dir: str, test_cmd: st
                      ["list_files", "read_file", "search", "write_file", "run"], max_turns)
 
 
-def ask(llm, ws: Workspace, task: str, paths: list[str] | None) -> str:
+def ask(llm, root: Path, task: str, paths: list[str] | None, n: int = 1,
+        output_limit: int = 6000) -> str:
+    """Fix 6 and 7: a helper with a fresh context gets a question and file paths (a pointer,
+    not the contents). It answers in 5 lines or less. Anything longer goes in a notes file,
+    the only file it can write, and the worker gets the path."""
+    notes = f".marathon/notes/helper-{n}.md"
+    ws = Workspace(root, writable_only=(notes,), output_limit=output_limit)
     q = task.strip()
     if paths:
         q += "\nLook at: " + ", ".join(paths)
-    answer = run_agent(llm, "subagent", prompts.SUBAGENT, q, ws, ["list_files", "read_file", "search"], 12)
-    return answer[:2000] or "(no answer)"
+    q += f"\nNotes file, if you need more than {ANSWER_LINES} lines: {notes}"
+    answer = run_agent(llm, "subagent", prompts.SUBAGENT, q, ws,
+                       ["list_files", "read_file", "search", "write_file"], 12)
+    lines = [line.rstrip() for line in answer.splitlines() if line.strip()][:ANSWER_LINES]
+    reply = "\n".join(lines)[:1000] or "(no answer)"
+    if (ws.root / notes).is_file():
+        reply += f"\nFull notes: {notes}"
+    return reply
 
 
 def judge(llm, goal: str, diff: str, limit: int = 60000) -> tuple[bool, str]:

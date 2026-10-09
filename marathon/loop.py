@@ -6,12 +6,14 @@
 One run:
   1. Make sure the goal is committed. If there are no tests yet, a separate test-writer agent
      writes them in its own worktree (Fix 6), and that commit becomes the base for every attempt.
-  2. Up to `max_attempts` attempts. Each one gets a fresh worktree and branch (Fix 8) and a fresh
-     context. The worker calls `checkpoint` after meaningful changes. The harness commits with
-     "[step N]" in the message and runs the tests itself (Fix 9).
+  2. Up to `max_attempts` attempts. Each one gets a fresh worktree and branch, its own container
+     when a sandbox is set (Fix 8), and a fresh context. The worker calls `checkpoint` after
+     meaningful changes. The harness undoes edits to protected files, commits with "[step N]"
+     in the message and runs the tests itself, in a fresh container when sandboxed (Fix 9).
   3. Every N steps (step % N == 0) the goal and the checklist go back in front of the model (Fix 1, 2).
-  4. If `patience` checkpoints in a row bring no progress, the plan is dropped: the worktree is
-     removed, a short note is kept, and the next attempt starts fresh (Fix 3).
+  4. After `switch_after` checkpoints without progress the agent is told to note why and switch
+     approach. If `patience` checkpoints in a row bring no progress, the plan is dropped: the
+     worktree is removed, a short note is kept, and the next attempt starts fresh (Fix 3).
   5. `finish` only counts when the tests pass and a clean-context judge says PASS (Fix 10).
 """
 
@@ -25,6 +27,7 @@ from pathlib import Path
 from . import agents, gitops, prompts
 from .checks import TestResult, run_tests
 from .config import Config
+from .sandbox import Sandbox
 from .tools import ToolError, Workspace, call_tool, parse_args, schemas
 
 WORKER_TOOLS = [
@@ -73,6 +76,13 @@ class Harness:
         self.notes: list[str] = []
         self.events: list[dict] = []
         self.base = ""
+        self.helpers = 0
+        self.sandbox = Sandbox(cfg.sandbox, cfg.image, cfg.allow_network, self.run_id)
+
+    @property
+    def protected(self) -> list[str]:
+        """Files the agent can't change: the tests, the goal and anything in --protect (Fix 9)."""
+        return [self.cfg.tests_dir, self.cfg.goal_file, *self.cfg.protect]
 
     # ------------------------------------------------------------ bookkeeping
     def log(self, kind: str, msg: str = "", **data) -> None:
@@ -148,6 +158,12 @@ class Harness:
                 "warn",
                 "Note: uncommitted changes in the repo are not copied into the agent's worktrees.",
             )
+        self.sandbox.check(log=lambda m: self.log("sandbox", m))
+        if self.sandbox.kind == "local":
+            self.log("sandbox", "Commands run directly on this machine. For long unattended runs, "
+                     "use --sandbox docker (or podman).")
+        else:
+            self.log("sandbox", f"Commands run in {self.sandbox.describe()}.")
 
     def has_tests(self, root: Path, tracked: bool) -> bool:
         if tracked:
@@ -166,18 +182,22 @@ class Harness:
         gitops.add_worktree(self.repo, path, branch, gitops.head(self.repo))
         ws = Workspace(
             path,
-            protected=(cfg.goal_file, ".git"),
+            protected=(cfg.goal_file, *cfg.protect, ".git"),
             writable_only=(cfg.tests_dir,),
             output_limit=cfg.tool_output_limit,
             cmd_timeout=cfg.cmd_timeout,
+            shell=self.sandbox.shell(path, "tests"),
         )
         self.log(
             "tests",
             f"No tests yet. A separate test-writer agent is writing them on {branch}.",
         )
-        summary = agents.write_tests(
-            self.llm, ws, cfg.goal_file, cfg.tests_dir, cfg.test_cmd
-        )
+        try:
+            summary = agents.write_tests(
+                self.llm, ws, cfg.goal_file, cfg.tests_dir, cfg.test_cmd
+            )
+        finally:
+            self.sandbox.close_all()
         if not self.has_tests(path, tracked=False):
             raise SystemExit(
                 "The test writer didn't write any tests. Add tests yourself, or try another model."
@@ -198,14 +218,17 @@ class Harness:
 
     # ------------------------------------------------------------ the run
     def run(self) -> str:
-        self.prepare()
-        self.base = self.ensure_tests()
-        outcome = "gave_up"
-        for n in range(1, self.cfg.max_attempts + 1):
-            result = self.run_attempt(n)
-            if result in ("done", "budget"):
-                outcome = result
-                break
+        try:
+            self.prepare()
+            self.base = self.ensure_tests()
+            outcome = "gave_up"
+            for n in range(1, self.cfg.max_attempts + 1):
+                result = self.run_attempt(n)
+                if result in ("done", "budget"):
+                    outcome = result
+                    break
+        finally:
+            self.sandbox.close_all()  # no container outlives the run, even on Ctrl-C
         self.save_state(outcome=outcome)
         if outcome == "gave_up":
             self.log(
@@ -221,11 +244,13 @@ class Harness:
         gitops.remove_worktree(self.repo, path)
         branch = f"marathon/{self.run_id}/attempt-{n}"
         gitops.add_worktree(self.repo, path, branch, self.base)
+        self.sandbox.close_all()  # the last attempt's container goes before this one starts
         ws = Workspace(
             path,
-            protected=(cfg.tests_dir, cfg.goal_file, ".marathon", ".git"),
+            protected=(*self.protected, ".marathon/outputs", ".git"),
             output_limit=cfg.tool_output_limit,
             cmd_timeout=cfg.cmd_timeout,
+            shell=self.sandbox.shell(path, f"attempt-{n}"),
         )
         baseline = self.measure(path)
         a = Attempt(n, branch, path, ws, gitops.last_step(path), baseline, baseline)
@@ -308,11 +333,14 @@ class Harness:
                         a.step, cfg.reread_every_steps
                     )
                 elif name == "ask_subagent":
+                    self.helpers += 1
                     out = agents.ask(
                         self.llm,
-                        Workspace(path, output_limit=cfg.tool_output_limit),
+                        path,
                         str(args.get("task", "")),
                         args.get("paths"),
+                        n=self.helpers,
+                        output_limit=cfg.tool_output_limit,
                     )
                 else:
                     out = call_tool(ws, name, args)
@@ -354,8 +382,10 @@ class Harness:
 
     # ------------------------------------------------------------ the pieces
     def measure(self, path: Path) -> TestResult:
+        """Run the tests: on this machine, or in a fresh container for every run."""
         return run_tests(
-            path, self.cfg.test_cmd, self.cfg.cmd_timeout, self.cfg.score_cmd
+            path, self.cfg.test_cmd, self.cfg.cmd_timeout, self.cfg.score_cmd,
+            runner=lambda cmd, timeout: self.sandbox.run_once(path, cmd, timeout),
         )
 
     def record(self, a: Attempt, r: TestResult) -> bool:
@@ -370,11 +400,9 @@ class Harness:
         return improved
 
     def commit(self, a: Attempt, message: str) -> list[str]:
-        """Undo any change to the tests or goal, then commit with the step number."""
+        """Undo any change to the protected files, then commit with the step number."""
         a.step += 1
-        restored = gitops.restore(
-            a.path, self.base, [self.cfg.tests_dir, self.cfg.goal_file]
-        )
+        restored = gitops.restore(a.path, self.base, self.protected)
         gitops.commit_step(a.path, a.step, message)
         a.turns_since_checkpoint = 0
         return restored
@@ -427,6 +455,18 @@ class Harness:
             if improved
             else f"No progress: {a.stall}/{self.cfg.patience} checkpoints in a row."
         )
+        n = self.cfg.switch_after
+        if not improved and n and a.stall % n == 0 and a.stall < self.cfg.patience:
+            # Fix 3, enforced by the harness: don't leave "3 fails, switch" to the model alone
+            out += (f"\n{a.stall} checkpoints in a row without progress. Write in PROGRESS.md why "
+                    "this approach isn't working, then switch to a different one.")
+            self.log(
+                "switch",
+                f"[attempt {a.number} | step {a.step}] {a.stall} checkpoints without progress: "
+                "told the agent to note why and switch approach",
+                attempt=a.number,
+                step=a.step,
+            )
         if restored:
             out += f"\nChanges to read-only files were undone: {', '.join(restored)}."
         return out + self.test_report(a, r)
