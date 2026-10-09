@@ -183,6 +183,21 @@ class Loop(TempRepoCase):
                    if m["role"] == "tool"]
         self.assertTrue(any("then switch to a different one" in r for r in results))
 
+    def test_tests_run_every_n_steps(self):
+        root = self.repo_with_tests()
+        llm = ScriptedLLM({"worker": [call("checkpoint", summary=f"change {i}") for i in range(1, 5)]
+                           + [say("ok")]})
+        h = harness(root, llm, test_every=2, patience=10, max_turns=5)
+        h.run()
+        cps = self.kinds(h, "checkpoint")
+        self.assertEqual([(e["step"], e.get("tested", True)) for e in cps],
+                         [(1, False), (2, True), (3, False), (4, True)])
+        self.assertEqual([e["stall"] for e in cps if "stall" in e], [1, 2])  # only test runs count
+        last = [ms for a, ms in llm.seen if a == "worker"][-1]
+        results = [m["content"] for m in last if m["role"] == "tool"]
+        self.assertIn("The tests run every 2 steps, next at step 2.", results[0])
+        self.assertIn("0/1 tests pass. No progress: 1/10 test runs in a row.", results[1])
+
     def test_protected_paths_are_restored_and_read_only(self):
         root = self.make_repo({"goal.md": demo.GOAL, "tests/test_slug.py": demo.TESTS,
                                "Makefile": "test:\n\tpython3 -m unittest\n"})

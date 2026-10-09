@@ -417,6 +417,9 @@ class Harness:
 
     def checkpoint(self, a: Attempt, summary: str, forced: bool = False) -> str:
         restored = self.commit(a, summary)
+        every = self.cfg.test_every
+        if every > 1 and a.step % every:
+            return self.checkpoint_without_tests(a, restored, forced)
         r = self.measure(a.path)
         improved = self.record(a, r)
         status = (
@@ -440,25 +443,19 @@ class Harness:
             stall=a.stall,
             restored=restored,
         )
-        if gitops.is_reread_step(a.step, self.cfg.reread_every_steps):
-            self.log(
-                "reread",
-                f"[attempt {a.number} | step {a.step}] step % {self.cfg.reread_every_steps} == 0: "
-                "the goal goes back in front of the agent",
-                attempt=a.number,
-                step=a.step,
-            )
+        self.log_reread(a)
         self.save_state(a)
+        runs = "checkpoints" if self.cfg.test_every == 1 else "test runs"
         out = f"Committed as step {a.step}. {r.summary()}. "
         out += (
             "That's progress."
             if improved
-            else f"No progress: {a.stall}/{self.cfg.patience} checkpoints in a row."
+            else f"No progress: {a.stall}/{self.cfg.patience} {runs} in a row."
         )
         n = self.cfg.switch_after
         if not improved and n and a.stall % n == 0 and a.stall < self.cfg.patience:
             # Fix 3, enforced by the harness: don't leave "3 fails, switch" to the model alone
-            out += (f"\n{a.stall} checkpoints in a row without progress. Write in PROGRESS.md why "
+            out += (f"\n{a.stall} {runs} in a row without progress. Write in PROGRESS.md why "
                     "this approach isn't working, then switch to a different one.")
             self.log(
                 "switch",
@@ -470,6 +467,37 @@ class Harness:
         if restored:
             out += f"\nChanges to read-only files were undone: {', '.join(restored)}."
         return out + self.test_report(a, r)
+
+    def checkpoint_without_tests(self, a: Attempt, restored: list[str], forced: bool) -> str:
+        """Fix 2 with --test-every N: commit now, run the tests at the next multiple of N."""
+        every = self.cfg.test_every
+        nxt = a.step + every - a.step % every
+        self.log(
+            "checkpoint",
+            f"[attempt {a.number} | step {a.step}] committed, the tests run at step {nxt}"
+            + (" [made by the harness]" if forced else "")
+            + (f" [undid edits to read-only files: {', '.join(restored)}]" if restored else ""),
+            attempt=a.number,
+            step=a.step,
+            tested=False,
+            restored=restored,
+        )
+        self.log_reread(a)
+        self.save_state(a)
+        out = f"Committed as step {a.step}. The tests run every {every} steps, next at step {nxt}."
+        if restored:
+            out += f"\nChanges to read-only files were undone: {', '.join(restored)}."
+        return out
+
+    def log_reread(self, a: Attempt) -> None:
+        if gitops.is_reread_step(a.step, self.cfg.reread_every_steps):
+            self.log(
+                "reread",
+                f"[attempt {a.number} | step {a.step}] step % {self.cfg.reread_every_steps} == 0: "
+                "the goal goes back in front of the agent",
+                attempt=a.number,
+                step=a.step,
+            )
 
     def finish(self, a: Attempt, summary: str) -> tuple[str, bool]:
         restored = self.commit(a, "finish: " + summary)

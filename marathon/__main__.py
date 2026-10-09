@@ -15,7 +15,36 @@ import sys
 from pathlib import Path
 
 from . import gitops
-from .config import Config
+from .config import Config, SettingError, find_env_file, load_env_file
+
+FLAGS = (
+    "goal_file",
+    "tests_dir",
+    "test_cmd",
+    "score_cmd",
+    "min_delta",
+    "reread_every_steps",
+    "reread_every_turns",
+    "test_every",
+    "patience",
+    "switch_after",
+    "max_attempts",
+    "max_turns",
+    "hours",
+    "force_checkpoint_every",
+    "max_history",
+    "cmd_timeout",
+    "provider",
+    "model",
+    "helper_model",
+    "judge_model",
+    "base_url",
+    "api_key",
+    "max_tokens",
+    "sandbox",
+    "image",
+    "protect",
+)
 
 GOAL_TEMPLATE = """\
 # Goal
@@ -54,39 +83,11 @@ def cmd_run(args) -> int:
     from .loop import Harness
     from .sandbox import SandboxError
 
-    cfg = Config(repo=Path(args.repo))
-    for name in (
-        "goal_file",
-        "tests_dir",
-        "test_cmd",
-        "score_cmd",
-        "min_delta",
-        "reread_every_steps",
-        "reread_every_turns",
-        "patience",
-        "switch_after",
-        "max_attempts",
-        "max_turns",
-        "hours",
-        "force_checkpoint_every",
-        "max_history",
-        "cmd_timeout",
-        "provider",
-        "model",
-        "helper_model",
-        "judge_model",
-        "base_url",
-        "api_key",
-        "max_tokens",
-        "sandbox",
-        "image",
-        "protect",
-    ):
-        value = getattr(args, name, None)
-        if value is not None:
-            setattr(cfg, name, value)
-    if args.allow_network:
-        cfg.allow_network = True
+    try:
+        cfg = make_config(args)
+    except SettingError as e:
+        print(f"Settings error: {e}", file=sys.stderr)
+        return 4
     try:
         llm = build(cfg)
         print(f"Models: {llm.describe()}")
@@ -98,6 +99,28 @@ def cmd_run(args) -> int:
         print(f"Sandbox error: {e}", file=sys.stderr)
         return 3
     return 0 if outcome == "done" else 1
+
+
+def make_config(args, env=None) -> Config:
+    """Flags beat environment variables, which beat .env, which beats the defaults."""
+    env_file = find_env_file(getattr(args, "env_file", None))
+    if env_file:
+        loaded = load_env_file(env_file, env)
+        print(f"Settings: {len(loaded)} values from {env_file}")
+        repo = Path(args.repo).resolve()
+        if repo == env_file.resolve().parent or repo in env_file.resolve().parents:
+            print(f"Warning: {env_file} is inside the repo the agent works on. With --sandbox local "
+                  "its commands could read your API keys there. Keep .env in the marathon-agent "
+                  "folder, or pass --env-file.", file=sys.stderr)
+    cfg = Config.from_env(args.repo, env)
+    for name in FLAGS:
+        value = getattr(args, name, None)
+        if value is not None:
+            setattr(cfg, name, value)
+    if getattr(args, "allow_network", False):
+        cfg.allow_network = True
+    cfg.validate()
+    return cfg
 
 
 def main(argv=None) -> int:
@@ -112,6 +135,11 @@ def main(argv=None) -> int:
 
     r = sub.add_parser("run", help="run the loop on a repo with a goal.md")
     r.add_argument("--repo", required=True)
+    r.add_argument(
+        "--env-file",
+        dest="env_file",
+        help="settings and API keys (default: .env here, or in the marathon-agent folder)",
+    )
     r.add_argument("--goal-file", dest="goal_file")
     r.add_argument("--tests-dir", dest="tests_dir")
     r.add_argument(
@@ -138,6 +166,12 @@ def main(argv=None) -> int:
         help="re-read the goal when step %% N == 0",
     )
     r.add_argument("--reread-every-turns", dest="reread_every_turns", type=int)
+    r.add_argument(
+        "--test-every",
+        dest="test_every",
+        type=int,
+        help="run the tests every N steps (1 = every checkpoint); finish always runs them",
+    )
     r.add_argument(
         "--patience", type=int, help="checkpoints without progress before a fresh start"
     )

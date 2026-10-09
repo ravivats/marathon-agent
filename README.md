@@ -8,8 +8,10 @@ Plain Python 3.10+, standard library only, about 1,800 lines. It works with Clau
 Anthropic's own API, with OpenAI, OpenRouter and Ollama, or with any OpenAI-compatible server,
 and it can run every command in a container.
 
-**How it fits together:** [docs/architecture.md](docs/architecture.md) has Mermaid diagrams of the
-parts, of one run, and of one checkpoint.
+**How it fits together:** [docs/architecture.md](docs/architecture.md) has the diagrams below as
+Mermaid source, with a table of which file does what.
+
+[![The parts of marathon and how they talk: .env and the command line feed the harness, which runs four agents. They reach models through a per-role router, and their commands go through the sandbox to this machine or to containers.](docs/architecture-parts.png)](docs/architecture.md#the-parts)
 
 ## Try it in 10 seconds (no API key)
 
@@ -41,6 +43,30 @@ Attempt 2 starts on marathon/<run>/attempt-2. Right now: 0/1 tests pass.
 Done at step 3: 4/4 tests pass, judge PASS.
 ```
 
+## Setup
+
+You need Python 3.10 or newer and git. There's nothing to install.
+
+```bash
+git clone https://github.com/ravivats/marathon-agent.git
+cd marathon-agent
+cp .env.example .env      # then add your API key to .env and check the model
+```
+
+`.env` holds your API keys and every setting. That includes the numbers behind the fixes:
+
+- how often the goal is re-read (`MARATHON_REREAD_EVERY`, every 5 steps)
+- how often the tests run (`MARATHON_TEST_EVERY`, every step)
+- when the agent is told to switch approach (`MARATHON_SWITCH_AFTER`, after 3 test runs with no progress)
+- when an attempt is dropped (`MARATHON_PATIENCE`, after 25)
+
+Every line in [`.env.example`](.env.example) says what it does. marathon reads `.env` from the
+folder you run it in, or from the marathon-agent folder, and `--env-file` points at another file.
+A flag beats an environment variable, which beats `.env`, which beats the built-in default.
+
+Keep `.env` in the marathon-agent folder. It's git-ignored, and marathon warns you if it finds
+one inside the repo the agent works on, where the agent could read your keys.
+
 ## Run it for real
 
 ```bash
@@ -48,13 +74,12 @@ Done at step 3: 4/4 tests pass, judge PASS.
 python3 -m marathon init ~/work/slugify
 #    edit ~/work/slugify/goal.md
 
-# 2. a model and its API key
-export ANTHROPIC_API_KEY=<your key>
-export MARATHON_MODEL=anthropic:claude-sonnet-5-5
-
-# 3. a container engine for the agent's commands (see below), then go to bed
-python3 -m marathon run --repo ~/work/slugify --hours 8 --sandbox docker
+# 2. start it and go to bed (the model, the API key and the settings come from .env)
+python3 -m marathon run --repo ~/work/slugify
 ```
+
+`.env.example` runs the agent's commands in Docker containers (`MARATHON_SANDBOX=docker`), so
+start Colima or Docker first. See [Run the agent's commands in containers](#run-the-agents-commands-in-containers).
 
 You can also point `run` at an existing repo. Put a `goal.md` in it. If it already has tests in
 `tests/`, those are used and no tests are written.
@@ -63,7 +88,8 @@ When it's done, the work is on a branch: `git merge marathon/<run>/attempt-<n>`.
 
 ### Models and API keys
 
-A model is written as `provider:model`. The key comes from that provider's usual env var.
+A model is written as `provider:model`, in `MARATHON_MODEL` or `--model`. The key goes in `.env`
+under that provider's usual name (or in your environment).
 
 | Provider | `--model` example | API key from |
 |---|---|---|
@@ -87,20 +113,20 @@ python3 -m marathon run --repo ~/work/slugify \
   --judge-model openai:<model>      # a judge from another model family is a cheap second opinion
 ```
 
-The same works with `MARATHON_MODEL`, `MARATHON_HELPER_MODEL` and `MARATHON_JUDGE_MODEL`.
+The same works with `MARATHON_MODEL`, `MARATHON_HELPER_MODEL` and `MARATHON_JUDGE_MODEL` in `.env`.
 Mixing providers is fine: each one uses its own key.
 
 **Keep keys out of the agent's reach.** Only the harness reads them. The commands the agent runs
 never see them: on this machine, any variable with KEY, TOKEN, SECRET or PASSWORD in its name is
-removed, and a container gets only `HOME`. Don't put a key in a file inside the repo you point
-marathon at, because the agent can read every file there.
+removed, and a container gets only `HOME`. Keep `.env` in the marathon-agent folder, never in the
+repo you point marathon at, because the agent can read every file there.
 
 ### Run the agent's commands in containers
 
 ```bash
 brew install colima docker   # a small Linux VM and the docker CLI, no Docker Desktop needed
 colima start
-python3 -m marathon run --repo ~/work/slugify --sandbox docker
+python3 -m marathon run --repo ~/work/slugify   # MARATHON_SANDBOX=docker in .env, or --sandbox docker
 ```
 
 Any Docker-compatible CLI works. Colima runs the Docker engine in a light VM and gives you the
@@ -120,6 +146,8 @@ Use `--sandbox podman` for Podman, or `--sandbox nerdctl` for Colima's container
 
 ## How a run works
 
+[![One run: tests first, then attempts in fresh worktrees; each checkpoint is tested, stuck attempts are dropped, and finish needs passing tests and a judge PASS.](docs/architecture-one-run.png)](docs/architecture.md#one-run)
+
 1. **Tests first, by someone else.** If there are no tests, a separate test-writer agent, with its
    own fresh context, reads `goal.md` and writes them. It can only write inside `tests/`. That
    commit is the base for every attempt.
@@ -129,18 +157,23 @@ Use `--sandbox podman` for Podman, or `--sandbox nerdctl` for Colima's container
 3. **Checkpoints are steps.** When the worker calls `checkpoint`, the harness undoes any edits to
    `tests/`, `goal.md` and anything in `--protect`, commits everything as
    `"<summary> [step N]"`, and runs the tests itself (in a fresh container, with `--sandbox`).
+   The tests run at every step by default, or every `MARATHON_TEST_EVERY` steps.
    If the worker forgets, the harness makes a checkpoint every 15 turns.
 4. **The goal comes back every N steps.** When `step % N == 0`, `goal.md` is read from disk again
    and put at the end of the context, with the checklist in `PROGRESS.md`. There is a backup
    schedule every 20 model turns too.
 5. **Plans are temporary.** Progress means more tests passing (or a higher score, see below). Every
-   3 checkpoints in a row with no progress, the agent is told to write down why and switch
-   approach. After `--patience` checkpoints in a row with no progress (25 by default), the attempt
+   3 test runs in a row with no progress, the agent is told to write down why and switch
+   approach. After 25 test runs in a row with no progress (`MARATHON_PATIENCE`), the attempt
    is dropped:
    its folder goes, its branch stays, a short note is kept, and the next attempt starts in a
    fresh worktree with a fresh context.
 6. **"Done" has to be earned.** `finish` only counts when every test passes and a judge, which sees
    only the goal and the final diff, says PASS. Otherwise the reason goes back to the worker.
+
+What happens at one checkpoint:
+
+[![One checkpoint: protected files are put back, the work is committed as step N, the tests run in a fresh container, and the agent may be told to switch approach or re-read the goal.](docs/architecture-one-checkpoint.png)](docs/architecture.md#one-checkpoint)
 
 ## The fixes from the talk
 
@@ -158,7 +191,8 @@ agent follows whatever it was doing last.
   the commit log, so the commits are the record of how far the run got.
 - When `step % N == 0`, the harness reads `goal.md` from disk again and puts it at the end of the
   context, with the checklist from `PROGRESS.md`, the last and best test results, and the number of
-  checkpoints without progress. N is `--reread-every`: the default is 5, and the talk's example uses 25.
+  checkpoints without progress. N is `MARATHON_REREAD_EVERY` in `.env` (or `--reread-every`): the
+  default is 5, and the talk's example uses 25.
 - A backup re-read happens every 20 model turns (`--reread-every-turns`), in case the agent rarely
   checkpoints.
 
@@ -172,12 +206,12 @@ stopped working.
 
 - The system prompt says the plan and the steps are temporary and can be dropped at any time. If the
   same approach fails 3 times in a row, the agent writes down why in `PROGRESS.md` and tries another.
-- The harness doesn't leave that rule to the model alone. After 3 checkpoints in a row without
-  progress (`--switch-after`), and again after 6, 9 and so on, the checkpoint result tells the
+- The harness doesn't leave that rule to the model alone. After 3 test runs in a row without
+  progress (`MARATHON_SWITCH_AFTER`), and again after 6, 9 and so on, the checkpoint result tells the
   agent to write down why the approach isn't working and switch to a different one.
 - The harness also has a hard limit. Progress means more tests passing, or the same tests passing with a
-  better score when you set `--score-cmd`. After `--patience` checkpoints in a row with no progress
-  (default 25), it drops the attempt. The worktree is removed, the branch is kept so you can look at
+  better score when you set `--score-cmd`. After `MARATHON_PATIENCE` test runs in a row with no
+  progress (default 25), it drops the attempt. The worktree is removed, the branch is kept so you can look at
   it later, and a short note goes into `.marathon/attempts.md`.
 - The next attempt starts on a new branch, in a fresh worktree, with a fresh context. It gets the
   notes from the last three dropped attempts so it doesn't repeat them. After `--max-attempts`
@@ -213,8 +247,8 @@ Tests: `test_test_writer_commits_only_tests`, `test_helper_answers_in_5_lines_an
 **Problem in the talk: "done" too early.** If the agent runs its own checks, it can skip them, weaken
 them, or report a pass it didn't get.
 
-- The harness runs the tests itself, with a fixed command (`--test-cmd`) and a timeout, at every
-  checkpoint and on `finish`. It reads the pass and fail counts from unittest or pytest output.
+- The harness runs the tests itself, with a fixed command (`MARATHON_TEST_CMD`) and a timeout, at
+  every checkpoint (or every `MARATHON_TEST_EVERY` steps) and always on `finish`. It reads the pass and fail counts from unittest or pytest output.
 - The worker's file tools refuse to write to `tests/` and `goal.md`. Since `run` can still execute
   any shell command, the harness also puts both back exactly as they are in the base commit before
   every commit. Edits, new files and deletions there are undone, and the agent is told.
@@ -261,7 +295,7 @@ Tests: `test_finish_is_rejected_while_tests_fail`, `test_judge_sees_only_goal_an
 
 | Fix | Problem in the talk | In the code | Code |
 |---|---|---|---|
-| 2. Keep a checklist, and check against it | Mistakes pile up | The agent keeps `PROGRESS.md`, and every re-read shows it next to the goal and the latest test results. The talk re-runs the tests every 10 steps. Here they run at every checkpoint. | `prompts.reread_message` |
+| 2. Keep a checklist, and check against it | Mistakes pile up | The agent keeps `PROGRESS.md`, and every re-read shows it next to the goal and the latest test results. The talk re-runs the tests every 10 steps. Here they run at every checkpoint by default; set `MARATHON_TEST_EVERY=10` to match the talk. | `prompts.reread_message`, `Harness.checkpoint` |
 | 4. Use a lighter harness | Light harness, composable tools | A system prompt of about 20 lines and six general tools: `read_file`, `write_file`, `edit_file`, `list_files`, `search`, `run`. Three more (`checkpoint`, `finish`, `ask_subagent`) are how the agent talks to the harness. | `prompts.py`, `tools.py` |
 | 5. Point the agent at the data | Prompt too full | Tool output over 6,000 characters is cut to its start and end, the full text is saved to a file, and the agent gets the path. Failing test output is saved the same way. After 80 messages the oldest are dropped, keeping the system prompt and the task. | `Workspace.clip`, `Harness.test_report`, `Harness.trim` |
 | 7. Hand sub-agents a pointer, too | Prompt too full | `ask_subagent` takes file paths, and the worker can put a longer brief in `.marathon/notes/`. The helper sends back 5 lines and the path of its notes file. | `agents.ask` |
@@ -270,29 +304,41 @@ Tests: `test_finish_is_rejected_while_tests_fail`, `test_judge_sees_only_goal_an
 
 ## Settings
 
-| Flag | Default | Meaning |
-|---|---|---|
-| `--reread-every` | 5 | re-read the goal when `step % N == 0` |
-| `--reread-every-turns` | 20 | backup re-read, counted in model turns |
-| `--switch-after` | 3 | checkpoints in a row with no progress before the agent is told to switch approach |
-| `--patience` | 25 | checkpoints in a row with no progress before a fresh start |
-| `--max-attempts` | 5 | fresh starts before giving up |
-| `--hours` / `--max-turns` | 8 / 600 | budget for the whole run |
-| `--force-checkpoint-every` | 15 | model turns without a checkpoint before the harness makes one |
-| `--test-cmd` | an isolated unittest run of `tests/` | unittest and pytest output are both understood; the default is in `config.py` |
-| `--protect` | none | another read-only file or folder, like `Makefile`; repeat for more |
-| `--score-cmd` | none | for objective goals: a command that prints a number, higher is better |
-| `--min-delta` | 0 | smallest score gain that counts as progress |
-| `--max-history` | 80 | messages kept before the oldest are dropped |
-| `--sandbox` | `local` | where commands run: `local`, `docker`, `podman` or `nerdctl` (`MARATHON_SANDBOX`) |
-| `--image` | `python:3.12-slim` | container image (`MARATHON_IMAGE`) |
-| `--allow-network` | off | let commands in containers use the network |
-| `--model` | none | `provider:model` for the worker (`MARATHON_MODEL`) |
-| `--helper-model` | `--model` | the test writer and `ask_subagent` (`MARATHON_HELPER_MODEL`) |
-| `--judge-model` | `--model` | the judge (`MARATHON_JUDGE_MODEL`) |
-| `--provider` | `openai` | for model names without a provider (`MARATHON_PROVIDER`) |
-| `--base-url` / `--api-key` | the provider's | a custom OpenAI-compatible server (`MARATHON_BASE_URL`, `MARATHON_API_KEY`) |
-| `--max-tokens` | 16000 | longest reply, for Anthropic |
+Every setting has a `.env` name, and most have a flag too. A flag beats an environment variable,
+which beats `.env`, which beats the default. [`.env.example`](.env.example) lists them all with
+their defaults.
+
+| `.env` name | Flag | Default | Meaning |
+|---|---|---|---|
+| `MARATHON_REREAD_EVERY` | `--reread-every` | 5 | re-read the goal when `step % N == 0`; 0 turns it off |
+| `MARATHON_REREAD_EVERY_TURNS` | `--reread-every-turns` | 20 | backup re-read, counted in model turns |
+| `MARATHON_TEST_EVERY` | `--test-every` | 1 | run the tests every N steps; `finish` always runs them |
+| `MARATHON_SWITCH_AFTER` | `--switch-after` | 3 | test runs in a row without progress before the agent is told to switch approach; 0 turns it off |
+| `MARATHON_PATIENCE` | `--patience` | 25 | test runs in a row without progress before a fresh start |
+| `MARATHON_MAX_ATTEMPTS` | `--max-attempts` | 5 | fresh starts before giving up |
+| `MARATHON_FORCE_CHECKPOINT_EVERY` | `--force-checkpoint-every` | 15 | model turns without a checkpoint before the harness makes one |
+| `MARATHON_HOURS` / `MARATHON_MAX_TURNS` | `--hours` / `--max-turns` | 8 / 600 | budget for the whole run |
+| `MARATHON_MAX_HISTORY` | `--max-history` | 80 | messages kept before the oldest are dropped |
+| `MARATHON_TOOL_OUTPUT_LIMIT` | | 6000 | characters of tool output shown inline; the rest goes to a file |
+| `MARATHON_CMD_TIMEOUT` | `--cmd-timeout` | 300 | seconds for any one command, tests included |
+| `MARATHON_TEST_CMD` | `--test-cmd` | an isolated unittest run of `tests/` | unittest and pytest output are both understood; the default is in `config.py` |
+| `MARATHON_PROTECT` | `--protect` | none | more read-only paths: comma-separated in `.env`, or repeat the flag |
+| `MARATHON_SCORE_CMD` | `--score-cmd` | none | for objective goals: a command that prints a number, higher is better |
+| `MARATHON_MIN_DELTA` | `--min-delta` | 0 | smallest score gain that counts as progress |
+| `MARATHON_GOAL_FILE` / `MARATHON_TESTS_DIR` | `--goal-file` / `--tests-dir` | `goal.md` / `tests` | |
+| `MARATHON_SANDBOX` | `--sandbox` | `local` (`docker` in `.env.example`) | where commands run: `local`, `docker`, `podman` or `nerdctl` |
+| `MARATHON_IMAGE` | `--image` | `python:3.12-slim` | container image |
+| `MARATHON_ALLOW_NETWORK` | `--allow-network` | off | let commands in containers use the network |
+| `MARATHON_MODEL` | `--model` | none | `provider:model` for the worker |
+| `MARATHON_HELPER_MODEL` | `--helper-model` | the worker's | the test writer and `ask_subagent` |
+| `MARATHON_JUDGE_MODEL` | `--judge-model` | the worker's | the judge |
+| `MARATHON_PROVIDER` | `--provider` | `openai` | for model names without a provider |
+| `MARATHON_BASE_URL` / `MARATHON_API_KEY` | `--base-url` / `--api-key` | the provider's | a custom OpenAI-compatible server |
+| `MARATHON_MAX_TOKENS` | `--max-tokens` | 16000 | longest reply, for Anthropic |
+| | `--env-file` | `.env` | where to read settings and keys from |
+
+API keys go in `.env` (or your environment) as `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and
+`OPENROUTER_API_KEY`.
 
 Objective goals, like "make this function faster", can use `--score-cmd`:
 progress is more tests passing, or the same tests passing with a better score.
@@ -323,10 +369,11 @@ marathon/
   checks.py    runs the tests and reads the counts
   prompts.py   the short prompts
   llm.py       Anthropic and OpenAI-compatible clients, the per-role router, a scripted fake
-  config.py    every setting and its default
+  config.py    every setting, its default, and reading .env
   demo.py      the offline demo
 tests/         python3 -m unittest -v
-docs/          architecture.md: diagrams of the parts, a run and a checkpoint
+docs/          architecture.md: diagrams of the parts, a run and a checkpoint (+ PNGs)
+.env.example   every setting and API key; copy it to .env
 ```
 
 ## Be careful with `run`
