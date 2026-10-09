@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -242,6 +243,40 @@ def make_llm(spec: str, default_provider: str = "openai", base_url: str = "",
     if style == "anthropic":
         return AnthropicLLM(model, url, key, max_tokens=max_tokens)
     return ChatLLM(model, url, key)
+
+
+def get_json(url: str, headers: dict, timeout: int = 10) -> dict:
+    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout) as r:
+        return json.load(r)
+
+
+NOT_CHAT = ("audio", "realtime", "tts", "transcribe", "image", "search", "embedding",
+            "moderation", "dall-e", "whisper")
+
+
+def list_models(provider: str, api_key: str, timeout: int = 10) -> list[str]:
+    """The models on a platform, newest first, for the start-up question. Best effort: an empty
+    list if the platform can't be reached. OpenRouter lists only models that can call tools."""
+    try:
+        if provider == "anthropic":
+            data = get_json("https://api.anthropic.com/v1/models?limit=100",
+                            {"x-api-key": api_key, "anthropic-version": AnthropicLLM.version}, timeout)
+            return [m["id"] for m in data.get("data", [])]  # already newest first
+        if provider == "openai":
+            data = get_json("https://api.openai.com/v1/models",
+                            {"Authorization": f"Bearer {api_key}"}, timeout)
+            found = sorted(data.get("data", []), key=lambda m: m.get("created", 0), reverse=True)
+            return [m["id"] for m in found
+                    if re.match(r"(gpt-|o\d)", m["id"]) and not any(w in m["id"] for w in NOT_CHAT)]
+        if provider == "openrouter":
+            data = get_json("https://openrouter.ai/api/v1/models",
+                            {"Authorization": f"Bearer {api_key}"}, timeout)
+            found = [m for m in data.get("data", []) if "tools" in (m.get("supported_parameters") or [])]
+            found.sort(key=lambda m: m.get("created", 0), reverse=True)
+            return [m["id"] for m in found]
+    except Exception:  # any network or format problem: the person types a name instead
+        return []
+    return []
 
 
 ROLES = {"worker": "worker", "test_writer": "helper", "subagent": "helper", "judge": "judge"}

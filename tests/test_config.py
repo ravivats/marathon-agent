@@ -12,6 +12,7 @@ from pathlib import Path
 from marathon.__main__ import main, make_config
 from marathon.config import (DEFAULT_TEST_CMD, ENV, Config, SettingError, load_env_file,
                              read_env_file)
+from marathon.start import MODEL_VARS
 from tests.helpers import TempRepoCase
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -120,7 +121,7 @@ class Precedence(TempRepoCase):
 class Example(unittest.TestCase):
     def test_env_example_matches_the_code(self):
         values = read_env_file(ROOT / ".env.example")
-        unknown = set(values) - set(ENV.values()) - KEYS
+        unknown = set(values) - set(ENV.values()) - KEYS - set(MODEL_VARS)
         self.assertEqual(unknown, set(), "names in .env.example that the code doesn't read")
         missing = set(ENV.values()) - set(values)
         self.assertEqual(missing, set(), "settings missing from .env.example")

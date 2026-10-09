@@ -1,27 +1,35 @@
 # How marathon fits together
 
 Three diagrams: the parts and how they talk, what happens during one run, and what happens at a
-single checkpoint. GitHub draws them from the Mermaid source below. Every box names the file
-that does the work, so you can jump from a diagram to the code.
+single checkpoint. GitHub draws them from the Mermaid source below, and the same diagrams are
+saved as images next to this file for the README. Every box names the file that does the work,
+so you can jump from a diagram to the code. The numbers (every N steps) come from `.env`; see
+`.env.example`.
 
 Back to the [README](../README.md).
 
 ## The parts
 
 ```mermaid
-flowchart LR
-    you(["You"]) -->|"goal.md, flags, API keys"| cli["__main__.py<br/>command line"]
+flowchart TB
+    you(["You"]) -->|"answers"| startq["start.py<br/>asks: a platform you have a key for,<br/>a model, the goal"]
+    env[(".env<br/>API keys, every N")] --> config["config.py<br/>settings"]
+    config --> cli["__main__.py<br/>command line"]
+    startq -->|"model, goal.md"| cli
     cli --> harness["loop.py<br/>Harness"]
 
+    harness --> git["gitops.py<br/>worktrees, [step N] commits,<br/>restore protected files"]
+    harness --> state[(".marathon/<br/>log.jsonl, state.json, attempts.md")]
+    harness -->|"runs"| roles
+
     subgraph roles["Agents (agents.py, prompts.py)"]
-        direction TB
+        direction LR
         worker["Worker<br/>long task, long context"]
         tw["Test writer<br/>fresh context, writes tests/ only"]
         helper["ask_subagent helper<br/>fresh context, 5-line answer + notes file"]
         judge["Judge<br/>sees only the goal and the diff"]
     end
 
-    harness -->|"runs"| roles
     roles -->|"model calls"| router["llm.py<br/>Router: one model per role"]
     router --> anthropic["AnthropicLLM<br/>Messages API, prompt caching"]
     router --> chat["ChatLLM<br/>OpenAI-compatible"]
@@ -29,14 +37,11 @@ flowchart LR
     chat --> others[("OpenAI, OpenRouter,<br/>Ollama, any compatible server")]
 
     roles -->|"tool calls"| tools["tools.py<br/>Workspace: read, write, edit,<br/>list, search, run"]
-    tools -->|"run"| sandbox["sandbox.py"]
     harness -->|"run the tests"| checks["checks.py<br/>pass and fail counts"]
+    tools -->|"run"| sandbox["sandbox.py"]
     checks --> sandbox
     sandbox --> local["LocalShell<br/>this machine, keys removed"]
     sandbox --> containers["Containers: docker, podman, nerdctl<br/>one per attempt + a fresh one per test run<br/>no network, no keys"]
-
-    harness --> git["gitops.py<br/>worktrees, [step N] commits,<br/>restore protected files"]
-    harness --> state[(".marathon/<br/>log.jsonl, state.json, attempts.md")]
 ```
 
 | File | Job | Fixes |
@@ -49,14 +54,16 @@ flowchart LR
 | `checks.py` | Runs the tests (and an optional score command) and reads the counts | 9 |
 | `gitops.py` | Worktrees and branches, `[step N]` commits, putting protected files back | 1, 8, 9 |
 | `llm.py` | Model clients (Anthropic, OpenAI-compatible) and the per-role router | |
-| `config.py` | Every setting and its default | |
+| `start.py` | The questions at start: a platform you have a key for, a model, the goal | |
+| `config.py` | Every setting, its default, and reading `.env` (flag > environment > `.env` > default) | |
 | `demo.py` | The demo: a prepared run, replayed in a throwaway repo | |
 
 ## One run
 
 ```mermaid
 flowchart TD
-    start(["marathon run"]) --> prep["Commit goal.md<br/>check the container engine"]
+    start(["marathon run"]) --> ask["Ask: a platform with a key in .env,<br/>a model, the goal in your words<br/>save goal.md after a yes"]
+    ask --> prep["Commit goal.md<br/>check the container engine"]
     prep --> has{"Tests in tests/ already?"}
     has -- "no" --> tw["Test writer writes them<br/>commit: tests [step 0]"]
     has -- "yes" --> base["Base commit<br/>every attempt starts here"]
@@ -72,12 +79,12 @@ flowchart TD
     help --> turn
 
     what -- "checkpoint" --> cp["Checkpoint<br/>see the next diagram"]
-    cp --> stuck{"No progress for<br/>--patience checkpoints?"}
+    cp --> stuck{"No progress for<br/>MARATHON_PATIENCE test runs?"}
     stuck -- "yes" --> drop["Drop the attempt<br/>remove the worktree, keep the branch<br/>save a short note"]
     drop --> more{"Attempts left?"}
     more -- "yes" --> attempt
     more -- "no" --> gaveup(["Stop: gave up"])
-    stuck -- "no" --> reread{"step % N == 0?"}
+    stuck -- "no" --> reread{"step % MARATHON_REREAD_EVERY == 0?"}
     reread -- "yes" --> goal["Put goal.md and PROGRESS.md<br/>back at the end of the context"]
     goal --> turn
     reread -- "no" --> turn
@@ -103,13 +110,15 @@ sequenceDiagram
     W->>H: checkpoint("what I changed")
     H->>G: put tests/, goal.md and --protect paths back as in the base commit
     H->>G: commit "what I changed [step N]"
-    H->>C: run the tests: isolated Python, no network, no keys
-    C-->>H: exit code and output
-    H->>H: more tests passing? count checkpoints without progress
-    alt every 3rd checkpoint in a row without progress
-        H-->>W: note why in PROGRESS.md, then switch approach (--switch-after)
+    opt every MARATHON_TEST_EVERY steps (1 = at every checkpoint)
+        H->>C: run the tests: isolated Python, no network, no keys
+        C-->>H: exit code and output
+        H->>H: more tests passing? count test runs without progress
     end
-    alt step % N == 0
+    opt every MARATHON_SWITCH_AFTER test runs in a row without progress
+        H-->>W: note why in PROGRESS.md, then switch approach
+    end
+    opt step % MARATHON_REREAD_EVERY == 0
         H-->>W: the goal and the checklist again
     end
     H-->>W: "Committed as step N. 3/4 tests pass." plus the failing output's path

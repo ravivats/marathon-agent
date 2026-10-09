@@ -45,12 +45,20 @@ Done at step 3: 4/4 tests pass, judge PASS.
 
 ## Setup
 
-You need Python 3.10 or newer and git. There's nothing to install.
+You need Python 3.10 or newer and git; marathon itself has no packages to install. To run the
+agent's commands in containers (the setting in `.env.example`), you also need a container engine.
+Install Docker Desktop, or Colima with:
+
+```bash
+brew install colima docker && colima start
+```
+
+Then:
 
 ```bash
 git clone https://github.com/ravivats/marathon-agent.git
 cd marathon-agent
-cp .env.example .env      # then add your API key to .env and check the model
+cp .env.example .env      # then add the API key for each platform you want to use
 ```
 
 `.env` holds your API keys and every setting. That includes the numbers behind the fixes:
@@ -69,17 +77,77 @@ one inside the repo the agent works on, where the agent could read your keys.
 
 ## Run it for real
 
-```bash
-# 1. a project folder with a goal
-python3 -m marathon init ~/work/slugify
-#    edit ~/work/slugify/goal.md
+### With your API key, step by step
 
-# 2. start it and go to bed (the model, the API key and the settings come from .env)
-python3 -m marathon run --repo ~/work/slugify
+1. Copy the settings file, if you haven't yet:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+2. Open `.env` and put your key on the line for your platform. For OpenAI:
+
+   ```
+   OPENAI_API_KEY=<your key>
+   ```
+
+   For the others, use `ANTHROPIC_API_KEY` or `OPENROUTER_API_KEY`. You can fill in more than one;
+   marathon asks which platform to use. Don't paste keys anywhere else, and don't commit `.env`
+   (it's git-ignored).
+
+3. Choose where the agent's commands run, with `MARATHON_SANDBOX` in `.env`:
+   - `docker` (the setting in `.env.example`): in containers, the safe choice for long runs. Start
+     Colima or Docker first, for example with `colima start`.
+   - `local`: directly on your machine, which is fine for a short try.
+
+4. From the marathon-agent folder, start a run on a project folder. It's created if it's new:
+
+   ```bash
+   python3 -m marathon run --repo ~/work/my-project
+   ```
+
+It then asks three things before it starts, for example:
+
+```
+Platforms you have an API key for:
+  1. Anthropic  (ANTHROPIC_API_KEY found)
+  2. OpenAI  (OPENAI_API_KEY found)
+Choose 1-2 [1]: 1
+Looking up models on Anthropic ...
+Models on Anthropic, newest first:
+  1. claude-sonnet-5-5  (suggested)
+  2. claude-opus-5-5
+  ...
+Choose 1-12, or type a model name [1]:
+
+What should the agent do? Describe the goal in your own words: what to build,
+and how you'll know it's done.
+Finish with an empty line.
+> (your goal, as many lines as you need)
+>
+
+Ready to start:
+  project   /Users/you/work/my-project
+  goal      (the first line of your goal)
+  model     anthropic:claude-sonnet-5-5
+  commands  in docker containers from python:3.12-slim, no network
+  budget    8 hours or 600 model turns
+Start? [Y/n]
 ```
 
-`.env.example` runs the agent's commands in Docker containers (`MARATHON_SANDBOX=docker`), so
-start Colima or Docker first. See [Run the agent's commands in containers](#run-the-agents-commands-in-containers).
+- **Platform:** only the platforms with a key in `.env` (or your environment) are offered. With
+  one key, that platform is used without asking.
+- **Model:** the list comes from the platform itself, newest first. The suggestion comes from
+  `MARATHON_ANTHROPIC_MODEL`, `MARATHON_OPENAI_MODEL` or `MARATHON_OPENROUTER_MODEL`, and you can
+  type any model name instead.
+- **Goal:** your own words, saved as `goal.md` in the project. If the project already has one,
+  pressing Enter keeps it. Nothing is written until you answer yes.
+- `--model` and `--prompt` answer the questions up front. For unattended runs, like a schedule,
+  `--no-input` asks nothing: it uses `MARATHON_MODEL` and the project's `goal.md` (or `--prompt`).
+- If you'd rather write the goal in an editor, `python3 -m marathon init PATH` makes a `goal.md`
+  to fill in.
+
+For more on containers, see [Run the agent's commands in containers](#run-the-agents-commands-in-containers).
 
 You can also point `run` at an existing repo. Put a `goal.md` in it. If it already has tests in
 `tests/`, those are used and no tests are written.
@@ -88,8 +156,9 @@ When it's done, the work is on a branch: `git merge marathon/<run>/attempt-<n>`.
 
 ### Models and API keys
 
-A model is written as `provider:model`, in `MARATHON_MODEL` or `--model`. The key goes in `.env`
-under that provider's usual name (or in your environment).
+In a terminal you pick the platform and the model when the run starts. Otherwise the model comes
+from `MARATHON_MODEL` or `--model`, written as `provider:model`. Each key goes in `.env` under that
+provider's usual name (or in your environment).
 
 | Provider | `--model` example | API key from |
 |---|---|---|
@@ -107,7 +176,7 @@ like `MARATHON_MODEL=gpt-x`, uses `--provider` (or `MARATHON_PROVIDER`), which d
 Each role can have its own model. The helpers are the test writer and `ask_subagent`:
 
 ```bash
-python3 -m marathon run --repo ~/work/slugify \
+python3 -m marathon run --repo ~/work/my-project \
   --model anthropic:claude-opus-5-5 \
   --helper-model anthropic:claude-haiku-5-5 \
   --judge-model openai:<model>      # a judge from another model family is a cheap second opinion
@@ -126,7 +195,7 @@ repo you point marathon at, because the agent can read every file there.
 ```bash
 brew install colima docker   # a small Linux VM and the docker CLI, no Docker Desktop needed
 colima start
-python3 -m marathon run --repo ~/work/slugify   # MARATHON_SANDBOX=docker in .env, or --sandbox docker
+python3 -m marathon run --repo ~/work/my-project   # MARATHON_SANDBOX=docker in .env, or --sandbox docker
 ```
 
 Any Docker-compatible CLI works. Colima runs the Docker engine in a light VM and gives you the
@@ -328,13 +397,16 @@ their defaults.
 | `MARATHON_SANDBOX` | `--sandbox` | `local` (`docker` in `.env.example`) | where commands run: `local`, `docker`, `podman` or `nerdctl` |
 | `MARATHON_IMAGE` | `--image` | `python:3.12-slim` | container image |
 | `MARATHON_ALLOW_NETWORK` | `--allow-network` | off | let commands in containers use the network |
-| `MARATHON_MODEL` | `--model` | none | `provider:model` for the worker |
+| `MARATHON_MODEL` | `--model` | none | `provider:model` for the worker; the flag skips the questions at start |
+| `MARATHON_ANTHROPIC_MODEL` / `MARATHON_OPENAI_MODEL` / `MARATHON_OPENROUTER_MODEL` | | `claude-sonnet-5-5` / none / none | the model suggested for each platform at start |
 | `MARATHON_HELPER_MODEL` | `--helper-model` | the worker's | the test writer and `ask_subagent` |
 | `MARATHON_JUDGE_MODEL` | `--judge-model` | the worker's | the judge |
 | `MARATHON_PROVIDER` | `--provider` | `openai` | for model names without a provider |
 | `MARATHON_BASE_URL` / `MARATHON_API_KEY` | `--base-url` / `--api-key` | the provider's | a custom OpenAI-compatible server |
 | `MARATHON_MAX_TOKENS` | `--max-tokens` | 16000 | longest reply, for Anthropic |
 | | `--env-file` | `.env` | where to read settings and keys from |
+| | `--prompt` | none | the goal, instead of being asked; saved as `goal.md` |
+| | `--no-input` | off | ask nothing (for unattended runs); also the case without a terminal |
 
 API keys go in `.env` (or your environment) as `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and
 `OPENROUTER_API_KEY`.
@@ -369,6 +441,7 @@ marathon/
   prompts.py   the short prompts
   llm.py       Anthropic and OpenAI-compatible clients, the per-role router, ReplayLLM for the demo
   config.py    every setting, its default, and reading .env
+  start.py     the questions at start: platform, model, goal
   demo.py      the offline demo
 tests/         python3 -m unittest -v
 docs/          architecture.md: diagrams of the parts, a run and a checkpoint (+ PNGs)

@@ -3,14 +3,15 @@
 
 """Command line.
 
-python3 -m marathon init PATH        make a project folder with a goal.md to fill in
-python3 -m marathon run --repo PATH  run the loop (needs a model and an API key, see README)
+python3 -m marathon run --repo PATH  asks for the platform, the model and the goal, then runs
+python3 -m marathon init PATH        make a project folder with a goal.md to fill in yourself
 python3 -m marathon demo             replay a prepared run in a throwaway repo (offline, no API key)
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -83,11 +84,25 @@ def cmd_run(args) -> int:
     from .loop import Harness
     from .sandbox import SandboxError
 
+    from . import start
+
     try:
         cfg = make_config(args)
+        if sys.stdin.isatty() and not args.no_input:
+            if not start.setup(cfg, os.environ, prompt=args.prompt, model_given=bool(args.model)):
+                print("Not started.")
+                return 0
+        elif args.prompt:
+            start.write_goal(Path(cfg.repo) / cfg.goal_file, args.prompt)
     except SettingError as e:
         print(f"Settings error: {e}", file=sys.stderr)
         return 4
+    except start.StartError as e:
+        print(f"Can't start: {e}", file=sys.stderr)
+        return 4
+    except KeyboardInterrupt:
+        print("\nNot started.")
+        return 130
     try:
         llm = build(cfg)
         print(f"Models: {llm.describe()}")
@@ -134,7 +149,17 @@ def main(argv=None) -> int:
     i.set_defaults(fn=cmd_init)
 
     r = sub.add_parser("run", help="run the loop on a repo with a goal.md")
-    r.add_argument("--repo", required=True)
+    r.add_argument("--repo", required=True, help="the project folder (created if it's new)")
+    r.add_argument(
+        "--prompt",
+        help="the goal, in your own words, instead of being asked (saved as goal.md)",
+    )
+    r.add_argument(
+        "--no-input",
+        dest="no_input",
+        action="store_true",
+        help="ask nothing: use MARATHON_MODEL and goal.md as they are (for unattended runs)",
+    )
     r.add_argument(
         "--env-file",
         dest="env_file",
@@ -203,7 +228,9 @@ def main(argv=None) -> int:
         "--provider",
         help="default provider for model names without one: openai, anthropic, openrouter, ollama",
     )
-    r.add_argument("--model", help='"provider:model", like anthropic:claude-sonnet-5-5')
+    r.add_argument(
+        "--model", help='"provider:model", like anthropic:claude-sonnet-5-5 (skips the questions)'
+    )
     r.add_argument(
         "--helper-model",
         dest="helper_model",
