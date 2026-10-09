@@ -1,9 +1,9 @@
 # Copyright (c) 2026 Ravi Vats
 # SPDX-License-Identifier: CC-BY-NC-SA-4.0
 
-"""An offline demo with a scripted model. No API key needed.
+"""The demo replays a prepared run in a throwaway repo, so it runs offline with no API key.
 
-It shows the mechanics end to end in a throwaway repo:
+It shows the harness end to end:
   - a separate test-writer agent writes the tests first
   - attempt 1 follows a bad plan, is told to switch approach after 2 checkpoints without
     progress, even tries to edit the tests (the harness undoes it), makes no progress for
@@ -20,7 +20,7 @@ from pathlib import Path
 
 from . import gitops
 from .config import Config
-from .llm import ScriptedLLM, call, say
+from .llm import ReplayLLM, call, say
 from .loop import Harness
 
 GOAL = """\
@@ -68,8 +68,9 @@ def slugify(text: str) -> str:
 """
 
 
-def script() -> ScriptedLLM:
-    return ScriptedLLM(
+def replay() -> ReplayLLM:
+    """The prepared run: each agent's moves, in order."""
+    return ReplayLLM(
         {
             "test_writer": [
                 call("write_file", path="tests/test_slug.py", content=TESTS),
@@ -153,9 +154,9 @@ def main(keep: bool = True) -> int:
         switch_after=2,
         reread_every_steps=2,
         max_attempts=3,
-        model="scripted",
+        model="replay",
     )
-    outcome = Harness(cfg, script()).run()
+    outcome = Harness(cfg, replay()).run()
     print(f"\nOutcome: {outcome}\n\nBranches and commits:")
     print(gitops.git(root, "log", "--all", "--graph", "--format=%h %s %d"))
     print(f"\nEvent log: {root / '.marathon' / 'log.jsonl'}")

@@ -12,7 +12,7 @@ Router        sends each agent to its own model: the worker, the helpers (test w
 build(cfg)    turns "provider:model" settings and API keys from the environment into a Router.
 
 The harness speaks one message format everywhere (OpenAI-style). AnthropicLLM converts on the way
-in and out. Also has ScriptedLLM, a fake that plays back canned replies, for tests and the demo.
+in and out. ReplayLLM replays prepared replies, one queue per agent, for the tests and the demo.
 """
 
 from __future__ import annotations
@@ -288,7 +288,7 @@ def build(cfg) -> Router:
                   names)
 
 
-# ---------------------------------------------------------------- offline fake
+# ---------------------------------------------------------------- replay, for the tests and the demo
 
 
 def call(name: str, **args) -> dict:
@@ -311,14 +311,14 @@ def say(text: str) -> dict:
     return {"role": "assistant", "content": text}
 
 
-class ScriptedLLM:
-    """Plays back canned replies, one queue per agent ("worker", "test_writer", "judge", "subagent").
+class ReplayLLM:
+    """Replays prepared replies, one queue per agent ("worker", "test_writer", "judge", "subagent").
 
     An item is either a message dict or a function(messages) -> message dict.
     """
 
-    def __init__(self, scripts: dict[str, list[dict | Callable[[list[dict]], dict]]]):
-        self.scripts = {k: list(v) for k, v in scripts.items()}
+    def __init__(self, moves: dict[str, list[dict | Callable[[list[dict]], dict]]]):
+        self.moves = {k: list(v) for k, v in moves.items()}
         self.seen: list[tuple[str, list[dict]]] = []
 
     def complete(
@@ -328,8 +328,8 @@ class ScriptedLLM:
         agent: str = "worker",
     ) -> dict:
         self.seen.append((agent, [dict(m) for m in messages]))
-        queue = self.scripts.get(agent) or []
+        queue = self.moves.get(agent) or []
         if not queue:
-            return say("(script finished)")
+            return say("(replay finished)")
         item = queue.pop(0)
         return item(messages) if callable(item) else item

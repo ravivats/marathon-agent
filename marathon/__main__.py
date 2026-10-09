@@ -5,7 +5,7 @@
 
 python3 -m marathon init PATH        make a project folder with a goal.md to fill in
 python3 -m marathon run --repo PATH  run the loop (needs a model and an API key, see README)
-python3 -m marathon demo             offline demo with a scripted model, no API key
+python3 -m marathon demo             replay a prepared run in a throwaway repo (offline, no API key)
 """
 
 from __future__ import annotations
@@ -221,7 +221,7 @@ def main(argv=None) -> int:
     r.add_argument("--max-tokens", dest="max_tokens", type=int, help="per reply (16000)")
     r.set_defaults(fn=cmd_run)
 
-    d = sub.add_parser("demo", help="offline demo with a scripted model")
+    d = sub.add_parser("demo", help="replay a prepared run in a throwaway repo (offline, no API key)")
     d.set_defaults(fn=lambda a: __import__("marathon.demo", fromlist=["main"]).main())
 
     args = p.parse_args(argv)

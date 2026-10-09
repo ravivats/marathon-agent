@@ -128,9 +128,9 @@ class Containers(Fake):
         (self.root / "repo").mkdir()
         repo = self.root / "repo"
         (repo / "goal.md").write_text(demo.GOAL)
-        cfg = Config(repo=repo, model="scripted", sandbox=str(self.cli), image="img",
+        cfg = Config(repo=repo, model="replay", sandbox=str(self.cli), image="img",
                      patience=3, reread_every_steps=2, max_attempts=3)
-        h = Harness(cfg, demo.script(), echo=lambda *_: None)
+        h = Harness(cfg, demo.replay(), echo=lambda *_: None)
         self.assertEqual(h.run(), "done")
         calls = self.calls()
         started = [c[c.index("--name") + 1] for c in calls if c[0] == "run" and "-d" in c]

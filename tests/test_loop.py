@@ -1,13 +1,13 @@
 # Copyright (c) 2026 Ravi Vats
 # SPDX-License-Identifier: CC-BY-NC-SA-4.0
 
-"""End-to-end tests of the loop with a scripted model. No network."""
+"""End-to-end tests of the loop, with prepared replies (ReplayLLM). No network."""
 
 import unittest
 
 from marathon import demo, gitops
 from marathon.config import Config
-from marathon.llm import ScriptedLLM, call, say
+from marathon.llm import ReplayLLM, call, say
 from marathon.loop import Harness
 from tests.helpers import TempRepoCase
 
@@ -16,7 +16,7 @@ BAD = "def slugify(text):\n    return text\n"
 
 
 def harness(root, llm, **kw):
-    cfg = Config(repo=root, model="scripted", **kw)
+    cfg = Config(repo=root, model="replay", **kw)
     return Harness(cfg, llm, echo=lambda *_: None)
 
 
@@ -27,9 +27,9 @@ class Loop(TempRepoCase):
     def kinds(self, h, kind):
         return [e for e in h.events if e["kind"] == kind]
 
-    def test_demo_script_end_to_end(self):
+    def test_demo_replay_end_to_end(self):
         (self.root / "goal.md").write_text(demo.GOAL)
-        llm = demo.script()
+        llm = demo.replay()
         h = harness(self.root, llm, patience=3, reread_every_steps=2, max_attempts=3)
         self.assertEqual(h.run(), "done")
         # the test writer ran first, in its own context
@@ -53,7 +53,7 @@ class Loop(TempRepoCase):
 
     def test_test_writer_commits_only_tests(self):
         (self.root / "goal.md").write_text(demo.GOAL)
-        llm = ScriptedLLM(
+        llm = ReplayLLM(
             {
                 "test_writer": [
                     call("write_file", path="tests/test_slug.py", content=demo.TESTS),
@@ -74,7 +74,7 @@ class Loop(TempRepoCase):
 
     def test_reread_puts_goal_and_checklist_at_the_end(self):
         root = self.repo_with_tests()
-        llm = ScriptedLLM(
+        llm = ReplayLLM(
             {
                 "worker": [
                     call(
@@ -102,7 +102,7 @@ class Loop(TempRepoCase):
 
     def test_gives_up_after_max_attempts(self):
         root = self.repo_with_tests()
-        llm = ScriptedLLM({"worker": [call("checkpoint", summary="nothing")] * 20})
+        llm = ReplayLLM({"worker": [call("checkpoint", summary="nothing")] * 20})
         h = harness(root, llm, patience=2, max_attempts=2)
         self.assertEqual(h.run(), "gave_up")
         self.assertEqual(len(self.kinds(h, "drop")), 2)
@@ -110,7 +110,7 @@ class Loop(TempRepoCase):
 
     def test_finish_is_rejected_while_tests_fail(self):
         root = self.repo_with_tests()
-        llm = ScriptedLLM(
+        llm = ReplayLLM(
             {
                 "worker": [
                     call("write_file", path="slug.py", content=BAD),
@@ -135,7 +135,7 @@ class Loop(TempRepoCase):
 
     def test_judge_sees_only_goal_and_diff(self):
         root = self.repo_with_tests()
-        llm = ScriptedLLM(
+        llm = ReplayLLM(
             {
                 "worker": [
                     call("write_file", path="slug.py", content=GOOD),
@@ -165,7 +165,7 @@ class Loop(TempRepoCase):
 
     def test_harness_checkpoints_when_the_agent_forgets(self):
         root = self.repo_with_tests()
-        llm = ScriptedLLM({"worker": [call("list_files")] * 7})
+        llm = ReplayLLM({"worker": [call("list_files")] * 7})
         h = harness(root, llm, force_checkpoint_every=3, max_turns=7, patience=10)
         self.assertEqual(h.run(), "budget")
         forced = [
@@ -175,7 +175,7 @@ class Loop(TempRepoCase):
 
     def test_agent_is_told_to_switch_after_3_stalls(self):
         root = self.repo_with_tests()
-        llm = ScriptedLLM({"worker": [call("checkpoint", summary="same idea")] * 7})
+        llm = ReplayLLM({"worker": [call("checkpoint", summary="same idea")] * 7})
         h = harness(root, llm, patience=10, max_turns=7)
         self.assertEqual(h.run(), "budget")
         self.assertEqual([e["step"] for e in self.kinds(h, "switch")], [3, 6])
@@ -185,7 +185,7 @@ class Loop(TempRepoCase):
 
     def test_tests_run_every_n_steps(self):
         root = self.repo_with_tests()
-        llm = ScriptedLLM({"worker": [call("checkpoint", summary=f"change {i}") for i in range(1, 5)]
+        llm = ReplayLLM({"worker": [call("checkpoint", summary=f"change {i}") for i in range(1, 5)]
                            + [say("ok")]})
         h = harness(root, llm, test_every=2, patience=10, max_turns=5)
         h.run()
@@ -201,7 +201,7 @@ class Loop(TempRepoCase):
     def test_protected_paths_are_restored_and_read_only(self):
         root = self.make_repo({"goal.md": demo.GOAL, "tests/test_slug.py": demo.TESTS,
                                "Makefile": "test:\n\tpython3 -m unittest\n"})
-        llm = ScriptedLLM(
+        llm = ReplayLLM(
             {
                 "worker": [
                     call("write_file", path="Makefile", content="test:\n\ttrue\n"),
@@ -222,7 +222,7 @@ class Loop(TempRepoCase):
 
     def test_helper_answers_in_5_lines_and_leaves_notes(self):
         root = self.repo_with_tests()
-        llm = ScriptedLLM(
+        llm = ReplayLLM(
             {
                 "worker": [
                     call("write_file", path=".marathon/notes/brief.md", content="Find the slug rules."),
@@ -253,7 +253,7 @@ class Loop(TempRepoCase):
 
     def test_trim_never_starts_with_a_tool_result(self):
         root = self.repo_with_tests()
-        h = harness(root, ScriptedLLM({}), max_history=6)
+        h = harness(root, ReplayLLM({}), max_history=6)
         msgs = [{"role": "system", "content": "s"}, {"role": "user", "content": "task"}]
         for i in range(10):
             msgs.append(call("list_files"))

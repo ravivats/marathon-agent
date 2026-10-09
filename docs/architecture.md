@@ -50,7 +50,7 @@ flowchart LR
 | `gitops.py` | Worktrees and branches, `[step N]` commits, putting protected files back | 1, 8, 9 |
 | `llm.py` | Model clients (Anthropic, OpenAI-compatible) and the per-role router | |
 | `config.py` | Every setting and its default | |
-| `demo.py` | The offline demo with a scripted model | |
+| `demo.py` | The demo: a prepared run, replayed in a throwaway repo | |
 
 ## One run
 

@@ -19,10 +19,10 @@ Mermaid source, with a table of which file does what.
 python3 -m marathon demo
 ```
 
-No real model runs in the demo, which is why it needs no API key. A scripted fake model replays a
-fixed list of tool calls in a throwaway repo. Everything the harness does around those calls is real:
-the `[step N]` commits, the test runs, the goal re-reads, undoing edits to the tests, dropping the
-stuck attempt and starting a fresh worktree. For real reasoning you need a model, see
+The demo replays a prepared run in a throwaway repo, so it runs offline with no API key. You can
+watch the whole harness at work: the test writer, the `[step N]` commits, the test runs, the goal
+re-reads, undoing edits to the tests, the nudge to switch approach, dropping the stuck attempt, a
+fresh worktree, the helper's notes and the judge. To run it on your own goal with a model, see
 [Run it for real](#run-it-for-real).
 
 ```
@@ -218,7 +218,7 @@ stopped working.
   (default 5) the run stops.
 
 Code: `prompts.WORKER`, `Harness.record`, `Harness.checkpoint`, `Harness.drop`.
-Tests: `test_agent_is_told_to_switch_after_3_stalls`, `test_demo_script_end_to_end`,
+Tests: `test_agent_is_told_to_switch_after_3_stalls`, `test_demo_replay_end_to_end`,
 `test_worktree_removed_but_branch_kept`, `test_gives_up_after_max_attempts`.
 
 ### Fix 6. Hand slices of work to sub-agents
@@ -267,9 +267,8 @@ them, or report a pass it didn't get.
 - The test writer is told to write deterministic tests: no network, no clocks, no randomness
   without a fixed seed.
 
-Tests and code run in the same process, so code that sets out to cheat (say, by exiting early
-with fake output) can still fool a test run. The judge in Fix 10 reads the diff and is the
-backstop for that.
+The judge in Fix 10 covers what a test run can't: code that cheats from inside the test process,
+for example by printing a passing result and exiting early, shows up in the diff the judge reads.
 
 Code: `checks.run_tests`, `gitops.restore`, `Harness.commit`, `Workspace.check_write`,
 `Sandbox.run_once`, `config.DEFAULT_TEST_CMD`.
@@ -368,7 +367,7 @@ marathon/
   gitops.py    worktrees, [step N] commits, restoring protected files
   checks.py    runs the tests and reads the counts
   prompts.py   the short prompts
-  llm.py       Anthropic and OpenAI-compatible clients, the per-role router, a scripted fake
+  llm.py       Anthropic and OpenAI-compatible clients, the per-role router, ReplayLLM for the demo
   config.py    every setting, its default, and reading .env
   demo.py      the offline demo
 tests/         python3 -m unittest -v
