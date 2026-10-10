@@ -28,6 +28,10 @@ state = Path(os.environ["FAKE_CLI_STATE"])
 args = sys.argv[1:]
 with open(state / "calls.jsonl", "a") as f:
     f.write(json.dumps(args) + "\n")
+need = os.environ.get("FAKE_REQUIRE_HOST")  # act like an engine that only answers on one socket
+if need and os.environ.get("DOCKER_HOST") != need:
+    print("failed to connect to the docker API at unix:///var/run/docker.sock", file=sys.stderr)
+    sys.exit(1)
 def mount(a):
     return a[a.index("-v") + 1].rsplit(":/work", 1)[0]
 def command(a):
@@ -123,6 +127,45 @@ class Containers(Fake):
         self.assertEqual(len(checks), 1)
         self.assertIn("none", checks[0])
         self.assertIn(["rm", "-f", "marathon-r1-attempt-1"], calls)
+
+    def colima_case(self, with_socket: bool):
+        """A docker CLI whose context points at a missing socket, and Colima running elsewhere."""
+        home = self.root / "home"
+        sock = home / ".colima" / "default" / "docker.sock"
+        if with_socket:
+            sock.parent.mkdir(parents=True)
+            sock.write_text("")
+        bindir = self.root / "bin"
+        bindir.mkdir()
+        cli = bindir / "docker"  # the Colima fallback is for the docker CLI
+        cli.write_text(self.cli.read_text())
+        cli.chmod(cli.stat().st_mode | stat.S_IEXEC)
+        env = {"HOME": str(home), "FAKE_REQUIRE_HOST": f"unix://{sock}", "DOCKER_HOST": "",
+               "COLIMA_HOME": "", "XDG_CONFIG_HOME": ""}
+        patcher = mock.patch.dict(os.environ, env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return str(cli), f"unix://{sock}"
+
+    def test_finds_colima_when_the_docker_context_points_elsewhere(self):
+        cli, host = self.colima_case(with_socket=True)
+        logged = []
+        sb = Sandbox(cli, image="img", run_id="c1")
+        sb.check(log=logged.append)
+        self.assertEqual(sb.env["DOCKER_HOST"], host)
+        self.assertIn("Using Colima's Docker engine", logged[0])
+        # every later command reaches the engine too (the fake refuses any other socket)
+        shell = sb.shell(self.root, "attempt-1")
+        self.assertEqual(shell.run("echo hi", 10), (0, "hi\n"))
+        self.assertEqual(sb.run_once(self.root, "exit 3", 10)[0], 3)
+        sb.close_all()
+        self.assertIn(["rm", "-f", "marathon-c1-attempt-1"], self.calls())
+
+    def test_no_engine_says_how_to_point_docker_at_colima(self):
+        cli, _ = self.colima_case(with_socket=False)
+        with self.assertRaises(SandboxError) as e:
+            Sandbox(cli).check(log=lambda *_: None)
+        self.assertIn("docker context use colima", str(e.exception))
 
     def test_full_run_in_containers(self):
         (self.root / "repo").mkdir()

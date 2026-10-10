@@ -51,6 +51,7 @@ Install Docker Desktop, or Colima with:
 
 ```bash
 brew install colima docker && colima start
+docker context use colima     # point the docker command at Colima
 ```
 
 Then:
@@ -168,8 +169,10 @@ provider's usual name (or in your environment).
 | `ollama` | `ollama:qwen3:8b` | none, it runs on your machine |
 
 Claude goes through Anthropic's own Messages API with prompt caching, so most of a long run's
-growing prompt is read from the cache, which is cheaper and faster. The others go through the
-OpenAI-compatible `/chat/completions`. Any other OpenAI-compatible server works with
+growing prompt is read from the cache, which is cheaper and faster. OpenAI goes through its
+Responses API, which the newest OpenAI models (the pro models, for example) need. Their reasoning
+is handed back between tool calls in encrypted form, and nothing is stored at OpenAI. OpenRouter
+and Ollama go through the OpenAI-compatible `/chat/completions`. Any other OpenAI-compatible server works with
 `--base-url`, plus `--api-key` or `MARATHON_API_KEY` if it needs a key. A name without a provider,
 like `MARATHON_MODEL=gpt-x`, uses `--provider` (or `MARATHON_PROVIDER`), which defaults to `openai`.
 
@@ -195,6 +198,7 @@ repo you point marathon at, because the agent can read every file there.
 ```bash
 brew install colima docker   # a small Linux VM and the docker CLI, no Docker Desktop needed
 colima start
+docker context use colima     # point the docker command at Colima
 python3 -m marathon run --repo ~/work/my-project   # MARATHON_SANDBOX=docker in .env, or --sandbox docker
 ```
 
@@ -212,6 +216,10 @@ Use `--sandbox podman` for Podman, or `--sandbox nerdctl` for Colima's container
 - The image is `python:3.12-slim`, pulled once. For another language, use an image with its
   toolchain (`--image node:22`) and a matching `--test-cmd`.
 - Colima shares your home folder with its VM by default, so keep the repo under your home folder.
+- If Colima is running but your `docker` command points elsewhere (`docker info` shows
+  `Context: default` and can't connect), marathon finds Colima's socket in
+  `~/.colima/<profile>/docker.sock` and uses it. Run `docker context use colima` to point plain
+  `docker` commands at Colima too.
 
 ## How a run works
 
@@ -404,6 +412,7 @@ their defaults.
 | `MARATHON_PROVIDER` | `--provider` | `openai` | for model names without a provider |
 | `MARATHON_BASE_URL` / `MARATHON_API_KEY` | `--base-url` / `--api-key` | the provider's | a custom OpenAI-compatible server |
 | `MARATHON_MAX_TOKENS` | `--max-tokens` | 16000 | longest reply, for Anthropic |
+| `MARATHON_REQUEST_TIMEOUT` | `--request-timeout` | 600 | seconds to wait for one model reply; pro models can take minutes |
 | | `--env-file` | `.env` | where to read settings and keys from |
 | | `--prompt` | none | the goal, instead of being asked; saved as `goal.md` |
 | | `--no-input` | off | ask nothing (for unattended runs); also the case without a terminal |
@@ -439,7 +448,8 @@ marathon/
   gitops.py    worktrees, [step N] commits, restoring protected files
   checks.py    runs the tests and reads the counts
   prompts.py   the short prompts
-  llm.py       Anthropic and OpenAI-compatible clients, the per-role router, ReplayLLM for the demo
+  llm.py       clients for Anthropic, OpenAI (Responses API) and any OpenAI-compatible server,
+               the per-role router, ReplayLLM for the demo
   config.py    every setting, its default, and reading .env
   start.py     the questions at start: platform, model, goal
   demo.py      the offline demo

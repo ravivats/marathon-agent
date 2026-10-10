@@ -76,6 +76,7 @@ class Config:
     base_url: str = ""  # "" = the provider's own
     api_key: str = ""
     max_tokens: int = 16000  # per reply, for providers that need a limit (Anthropic)
+    request_timeout: int = 600  # seconds to wait for one model reply; pro models can take minutes
 
     @property
     def state_dir(self) -> Path:
@@ -96,7 +97,8 @@ class Config:
         at_least = {"test_every": 1, "patience": 1, "max_attempts": 1, "max_turns": 1,
                     "reread_every_steps": 0, "reread_every_turns": 0, "switch_after": 0,
                     "force_checkpoint_every": 1, "max_history": 4, "cmd_timeout": 1,
-                    "tool_output_limit": 200, "max_tokens": 1}
+                    "tool_output_limit": 200, "max_tokens": 1,
+                    "request_timeout": 10}
         for name, low in at_least.items():
             if getattr(self, name) < low:
                 raise SettingError(f"{ENV[name]} (--{_flag(name)}) must be at least {low}, "
@@ -135,6 +137,7 @@ ENV = {
     "base_url": "MARATHON_BASE_URL",
     "api_key": "MARATHON_API_KEY",
     "max_tokens": "MARATHON_MAX_TOKENS",
+    "request_timeout": "MARATHON_REQUEST_TIMEOUT",
 }
 
 

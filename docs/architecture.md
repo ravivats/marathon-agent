@@ -32,9 +32,11 @@ flowchart TB
 
     roles -->|"model calls"| router["llm.py<br/>Router: one model per role"]
     router --> anthropic["AnthropicLLM<br/>Messages API, prompt caching"]
-    router --> chat["ChatLLM<br/>OpenAI-compatible"]
+    router --> responses["ResponsesLLM<br/>Responses API, reasoning passed back"]
+    router --> chat["ChatLLM<br/>chat/completions"]
     anthropic --> claude[("Anthropic API")]
-    chat --> others[("OpenAI, OpenRouter,<br/>Ollama, any compatible server")]
+    responses --> openai[("OpenAI API")]
+    chat --> others[("OpenRouter, Ollama,<br/>any compatible server")]
 
     roles -->|"tool calls"| tools["tools.py<br/>Workspace: read, write, edit,<br/>list, search, run"]
     harness -->|"run the tests"| checks["checks.py<br/>pass and fail counts"]
@@ -53,7 +55,7 @@ flowchart TB
 | `sandbox.py` | Where commands run: this machine, or containers | 8, 9 |
 | `checks.py` | Runs the tests (and an optional score command) and reads the counts | 9 |
 | `gitops.py` | Worktrees and branches, `[step N]` commits, putting protected files back | 1, 8, 9 |
-| `llm.py` | Model clients (Anthropic, OpenAI-compatible) and the per-role router | |
+| `llm.py` | Model clients (Anthropic, OpenAI Responses API, any OpenAI-compatible server) and the per-role router | |
 | `start.py` | The questions at start: a platform you have a key for, a model, the goal | |
 | `config.py` | Every setting, its default, and reading `.env` (flag > environment > `.env` > default) | |
 | `demo.py` | The demo: a prepared run, replayed in a throwaway repo | |

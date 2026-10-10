@@ -42,6 +42,7 @@ FLAGS = (
     "base_url",
     "api_key",
     "max_tokens",
+    "request_timeout",
     "sandbox",
     "image",
     "protect",
@@ -245,7 +246,13 @@ def main(argv=None) -> int:
         dest="api_key",
         help="better: set ANTHROPIC_API_KEY, OPENAI_API_KEY or MARATHON_API_KEY",
     )
-    r.add_argument("--max-tokens", dest="max_tokens", type=int, help="per reply (16000)")
+    r.add_argument("--max-tokens", dest="max_tokens", type=int, help="per reply, for Anthropic (16000)")
+    r.add_argument(
+        "--request-timeout",
+        dest="request_timeout",
+        type=int,
+        help="seconds to wait for one model reply (600); pro models can take minutes",
+    )
     r.set_defaults(fn=cmd_run)
 
     d = sub.add_parser("demo", help="replay a prepared run in a throwaway repo (offline, no API key)")

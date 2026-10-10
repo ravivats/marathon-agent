@@ -55,6 +55,32 @@ def execute(args, cwd: Path | None, timeout: int, shell: bool = False,
         return 124, f"timed out after {timeout}s\n{out or ''}", True
 
 
+def colima_sockets() -> list[Path]:
+    """Where Colima keeps its Docker sockets, one per profile, the default profile first.
+    Colima's home is $COLIMA_HOME, ~/.colima, $XDG_CONFIG_HOME/colima or ~/.config/colima."""
+    homes = [Path(os.environ["COLIMA_HOME"])] if os.environ.get("COLIMA_HOME") else []
+    homes.append(Path.home() / ".colima")
+    if os.environ.get("XDG_CONFIG_HOME"):
+        homes.append(Path(os.environ["XDG_CONFIG_HOME"]) / "colima")
+    homes.append(Path.home() / ".config" / "colima")
+    found: list[Path] = []
+    for home in homes:
+        for sock in sorted(home.glob("*/docker.sock"), key=lambda p: p.parent.name != "default"):
+            if sock not in found:
+                found.append(sock)
+    return found
+
+
+def find_colima_host(cli: str) -> str | None:
+    """A running Colima engine the docker CLI isn't pointed at (its context is elsewhere)."""
+    for sock in colima_sockets():
+        host = f"unix://{sock}"
+        code, _, _ = execute([cli, "info"], None, 30, env={**os.environ, "DOCKER_HOST": host})
+        if code == 0:
+            return host
+    return None
+
+
 class LocalShell:
     """Runs commands on this machine, in one folder, without secrets in the environment."""
 
@@ -83,7 +109,7 @@ class ContainerShell:
     def start(self) -> None:
         argv = [self.sb.cli, "run", "-d", "--name", self.name, *self.sb.run_args(self.root),
                 self.sb.image, "sleep", "infinity"]
-        code, out, _ = execute(argv, None, 180)
+        code, out, _ = execute(argv, None, 180, env=self.sb.env)
         if code != 0:
             raise SandboxError(f"could not start container {self.name}: {out.strip()[-500:]}")
         self.started = True
@@ -95,7 +121,7 @@ class ContainerShell:
             except SandboxError as e:
                 return 125, f"error: {e}"
         argv = [self.sb.cli, "exec", "-w", "/work", self.name, "sh", "-c", command]
-        code, out, timed_out = execute(argv, None, timeout)
+        code, out, timed_out = execute(argv, None, timeout, env=self.sb.env)
         if timed_out:  # the command may still be running inside: throw the container away
             self.close()
             out += "\n(The container was restarted. Anything installed in it is gone.)"
@@ -103,7 +129,7 @@ class ContainerShell:
 
     def close(self) -> None:
         if self.started:
-            execute([self.sb.cli, "rm", "-f", self.name], None, 60)
+            execute([self.sb.cli, "rm", "-f", self.name], None, 60, env=self.sb.env)
             self.started = False
 
 
@@ -117,6 +143,9 @@ class Sandbox:
         self.prefix = f"marathon-{run_id or uuid.uuid4().hex[:8]}"
         self.shells: list = []
         self._checks = 0
+        # the environment for every container command: None = this process's own, or a copy
+        # with DOCKER_HOST set when the engine was found at Colima's socket (see check)
+        self.env: dict | None = None
 
     @property
     def kind(self) -> str:
@@ -148,14 +177,23 @@ class Sandbox:
             raise SandboxError(
                 f"{name} not found. Install Docker Desktop, or Colima with: brew install colima docker "
                 f"&& colima start. Podman works too: --sandbox podman.")
-        code, out, _ = execute([self.cli, "info"], None, 60)
+        code, out, _ = execute([self.cli, "info"], None, 60, env=self.env)
+        if code != 0 and name == "docker":
+            host = find_colima_host(self.cli)
+            if host:
+                self.env = {**os.environ, "DOCKER_HOST": host}
+                log(f"Using Colima's Docker engine at {host}. (Your docker context points "
+                    "elsewhere; `docker context use colima` makes plain docker commands use it too.)")
+                code = 0
         if code != 0:
-            raise SandboxError(f"`{name} info` failed, so no container engine is running. "
-                               f"With Colima, run: colima start\n{out.strip()[-400:]}")
-        code, _, _ = execute([self.cli, "image", "inspect", self.image], None, 60)
+            raise SandboxError(
+                f"`{name} info` failed, so no container engine answered. Start one (with Colima: "
+                f"colima start). If it's already running, point docker at it with `docker context "
+                f"use colima`, or set DOCKER_HOST in .env.\n{out.strip()[-400:]}")
+        code, _, _ = execute([self.cli, "image", "inspect", self.image], None, 60, env=self.env)
         if code != 0:
             log(f"Pulling {self.image} (once) ...")
-            code, out, _ = execute([self.cli, "pull", self.image], None, 900)
+            code, out, _ = execute([self.cli, "pull", self.image], None, 900, env=self.env)
             if code != 0:
                 raise SandboxError(f"could not pull {self.image}: {out.strip()[-400:]}")
 
@@ -172,9 +210,9 @@ class Sandbox:
         name = f"{self.prefix}-check-{self._checks}"
         argv = [self.cli, "run", "--rm", "--name", name, *self.run_args(root), self.image,
                 "sh", "-c", command]
-        code, out, timed_out = execute(argv, None, timeout)
+        code, out, timed_out = execute(argv, None, timeout, env=self.env)
         if timed_out:
-            execute([self.cli, "rm", "-f", name], None, 60)
+            execute([self.cli, "rm", "-f", name], None, 60, env=self.env)
         return code, out
 
     def close_all(self) -> None:

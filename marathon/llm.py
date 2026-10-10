@@ -3,16 +3,18 @@
 
 """Model clients. Standard library only.
 
-ChatLLM       any OpenAI-compatible /chat/completions endpoint: OpenAI, OpenRouter, Ollama,
-              LiteLLM, vLLM.
+ResponsesLLM  OpenAI through its Responses API (/v1/responses). The newest OpenAI models, like the
+              pro models, work only there. Reasoning is passed back between turns.
+ChatLLM       any OpenAI-compatible /chat/completions endpoint: OpenRouter, Ollama, LiteLLM,
+              vLLM, or your own server (--base-url).
 AnthropicLLM  Claude through Anthropic's own Messages API, with prompt caching.
 Router        sends each agent to its own model: the worker, the helpers (test writer and
               ask_subagent) and the judge. A different model for the judge is a cheap way to
               get a second opinion.
 build(cfg)    turns "provider:model" settings and API keys from the environment into a Router.
 
-The harness speaks one message format everywhere (OpenAI-style). AnthropicLLM converts on the way
-in and out. ReplayLLM replays prepared replies, one queue per agent, for the tests and the demo.
+The harness speaks one message format everywhere (OpenAI chat style). ResponsesLLM and AnthropicLLM
+convert on the way in and out. ReplayLLM replays prepared replies, one queue per agent, for the tests and the demo.
 """
 
 from __future__ import annotations
@@ -74,7 +76,8 @@ class ChatLLM:
         tools: list[dict] | None = None,
         agent: str = "worker",
     ) -> dict:
-        body = {"model": self.model, "messages": messages}
+        clean = [{k: v for k, v in m.items() if not k.startswith("_")} for m in messages]
+        body = {"model": self.model, "messages": clean}
         if tools:
             body["tools"] = tools
         headers = {"Content-Type": "application/json"}
@@ -210,11 +213,104 @@ class AnthropicLLM:
         return from_anthropic(payload)
 
 
+# ---------------------------------------------------------------- OpenAI Responses API
+
+KEPT = ("reasoning", "message", "function_call")
+
+
+def to_responses(messages: list[dict], tools: list[dict] | None, model: str,
+                 reasoning: bool = True) -> dict:
+    """OpenAI chat-style messages and tools -> a Responses API request body.
+
+    System messages become `instructions`; tool results become function_call_output items.
+    An assistant turn this client produced carries the model's own output items in "_items"
+    (reasoning, message, function_call); they go back exactly as they came, so a reasoning
+    model keeps its chain of thought between tool calls. store=false: nothing is kept at OpenAI,
+    and the reasoning travels encrypted."""
+    instructions = "\n\n".join(m["content"] for m in messages
+                                if m.get("role") == "system" and m.get("content"))
+    items: list[dict] = []
+    for m in messages:
+        role = m.get("role")
+        if role == "user":
+            items.append({"role": "user", "content": m.get("content") or "(empty)"})
+        elif role == "tool":
+            items.append({"type": "function_call_output", "call_id": m["tool_call_id"],
+                          "output": str(m.get("content") or "(no output)")})
+        elif role == "assistant" and m.get("_items"):
+            items.extend(i for i in m["_items"] if reasoning or i.get("type") != "reasoning")
+        elif role == "assistant":
+            if (m.get("content") or "").strip():
+                items.append({"role": "assistant", "content": m["content"]})
+            for c in m.get("tool_calls") or []:
+                fn = c.get("function") or {}
+                items.append({"type": "function_call", "call_id": c["id"], "name": fn.get("name", ""),
+                              "arguments": fn.get("arguments") or "{}"})
+    body: dict = {"model": model, "input": items, "store": False}
+    if instructions:
+        body["instructions"] = instructions
+    if reasoning:
+        body["include"] = ["reasoning.encrypted_content"]
+    if tools:
+        body["tools"] = [{"type": "function", "name": t["function"]["name"],
+                          "description": t["function"].get("description", ""),
+                          "parameters": t["function"]["parameters"], "strict": False}
+                         for t in tools]
+    return body
+
+
+def from_responses(payload: dict) -> dict:
+    """A Responses API reply -> an OpenAI chat-style assistant message, with the raw output
+    items kept in "_items" for the next request."""
+    output = payload.get("output") or []
+    text = "\n".join(part.get("text", "") for item in output if item.get("type") == "message"
+                     for part in item.get("content") or [] if part.get("type") == "output_text")
+    calls = [{"id": item["call_id"], "type": "function",
+              "function": {"name": item.get("name", ""), "arguments": item.get("arguments") or "{}"}}
+             for item in output if item.get("type") == "function_call"]
+    if payload.get("status") == "incomplete":
+        reason = (payload.get("incomplete_details") or {}).get("reason") or "unknown"
+        text += f"\n(The reply stopped early: {reason}.)"
+    msg = clean_message({"content": text.strip() or None, "tool_calls": calls})
+    kept = [i for i in output if i.get("type") in KEPT]
+    if any(i.get("type") != "reasoning" for i in kept):  # a lone reasoning item can't be sent back
+        msg["_items"] = kept
+    return msg
+
+
+class ResponsesLLM:
+    """OpenAI through the Responses API. Same interface as ChatLLM."""
+
+    def __init__(self, model: str, base_url: str = "https://api.openai.com/v1", api_key: str = "",
+                 timeout: int = 600, retries: int = 6):
+        if not model:
+            raise LLMError("No model set. Use --model or the MARATHON_MODEL env var.")
+        self.model, self.base_url, self.api_key = model, base_url.rstrip("/"), api_key
+        self.timeout, self.retries = timeout, retries
+        self.reasoning = True  # turned off if this model can't return encrypted reasoning
+
+    def complete(self, messages: list[dict], tools: list[dict] | None = None,
+                 agent: str = "worker") -> dict:
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"}
+        body = to_responses(messages, tools, self.model, self.reasoning)
+        try:
+            payload = post_json(f"{self.base_url}/responses", body, headers, self.timeout, self.retries)
+        except LLMError as e:
+            said = str(e).lower()
+            if self.reasoning and said.startswith("http 400") and ("encrypted" in said or '"include"' in said):
+                self.reasoning = False  # this model can't hand back encrypted reasoning: go without
+                return self.complete(messages, tools, agent)
+            raise
+        if payload.get("error"):
+            raise LLMError(f"OpenAI error: {str(payload['error'])[:300]}")
+        return from_responses(payload)
+
+
 # ---------------------------------------------------------------- providers and routing
 
 PROVIDERS = {
     # name: (API style, default base URL, env var that holds the key)
-    "openai": ("openai", "https://api.openai.com/v1", "OPENAI_API_KEY"),
+    "openai": ("responses", "https://api.openai.com/v1", "OPENAI_API_KEY"),
     "anthropic": ("anthropic", "https://api.anthropic.com/v1", "ANTHROPIC_API_KEY"),
     "openrouter": ("openai", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY"),
     "ollama": ("openai", "http://localhost:11434/v1", ""),
@@ -231,7 +327,7 @@ def split_spec(spec: str, default_provider: str = "openai") -> tuple[str, str]:
 
 
 def make_llm(spec: str, default_provider: str = "openai", base_url: str = "",
-             api_key: str = "", max_tokens: int = 16000):
+             api_key: str = "", max_tokens: int = 16000, timeout: int = 600):
     provider, model = split_spec(spec, default_provider)
     if provider not in PROVIDERS:
         raise LLMError(f"Unknown provider {provider!r}. Use one of: {', '.join(PROVIDERS)}.")
@@ -241,8 +337,10 @@ def make_llm(spec: str, default_provider: str = "openai", base_url: str = "",
         raise LLMError(f"No API key for {provider}. Set {key_env} (or MARATHON_API_KEY).")
     url = base_url or default_url
     if style == "anthropic":
-        return AnthropicLLM(model, url, key, max_tokens=max_tokens)
-    return ChatLLM(model, url, key)
+        return AnthropicLLM(model, url, key, max_tokens=max_tokens, timeout=timeout)
+    if style == "responses" and not base_url:  # OpenAI itself; a custom server gets chat/completions
+        return ResponsesLLM(model, url, key, timeout=timeout)
+    return ChatLLM(model, url, key, timeout=timeout)
 
 
 def get_json(url: str, headers: dict, timeout: int = 10) -> dict:
@@ -310,7 +408,7 @@ def build(cfg) -> Router:
         provider, _ = split_spec(spec, cfg.provider)
         same = provider == main
         return make_llm(spec, cfg.provider, cfg.base_url if same else "",
-                        cfg.api_key if same else "", cfg.max_tokens)
+                        cfg.api_key if same else "", cfg.max_tokens, cfg.request_timeout)
 
     def full(spec: str) -> str:
         return ":".join(split_spec(spec, cfg.provider))
